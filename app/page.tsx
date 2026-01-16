@@ -3,10 +3,11 @@
 import { useState, useEffect } from 'react';
 import Papa from 'papaparse';
 
-// --- ★ここで「画面の真ん中」に表示する名前を変える ---
-const APP_TITLE = "消費者行動論Ⅱの単位が欲しい";
-const APP_SUBTITLE = "自分だけの最強対策ドリル";
-// --------------------------------------------------
+// --- ★設定エリア ---
+// 画面タイトルなどはここで変更できます
+const APP_TITLE = "期末試験対策";
+const APP_SUBTITLE = "消費者行動論Ⅱ";
+// ------------------
 
 // 型定義
 type Question = {
@@ -43,6 +44,8 @@ export default function Home() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
   const [solvedQuestions, setSolvedQuestions] = useState<Set<number>>(new Set());
+  
+  // 出題数（初期値は10）
   const [selectedCount, setSelectedCount] = useState<number>(10);
 
   // ★あなたのスプレッドシートURL
@@ -73,10 +76,19 @@ export default function Home() {
   }, []);
 
   const startQuiz = () => {
+    // 0問以下なら開始しない
+    if (selectedCount <= 0) {
+        alert("出題数は1問以上にしてください");
+        return;
+    }
+
     let questionsToPlay = shuffleArray(allQuestions);
-    if (selectedCount > 0 && selectedCount < questionsToPlay.length) {
+    
+    // 指定された問題数でカット（全問題数より多い数字が入力されたら全問になる）
+    if (selectedCount < questionsToPlay.length) {
       questionsToPlay = questionsToPlay.slice(0, selectedCount);
     }
+
     setActiveQuestions(questionsToPlay);
     setCurrentIndex(0);
     setSolvedQuestions(new Set());
@@ -144,6 +156,15 @@ export default function Home() {
     }
   };
 
+  // 入力欄の数字が変わったときの処理
+  const handleCountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = Number(e.target.value);
+    // マイナスなどが入力されても、最大値を超えないように制御
+    if (val >= 0) {
+        setSelectedCount(val);
+    }
+  };
+
   const currentScore = solvedQuestions.size;
   const currentQ = activeQuestions[currentIndex];
 
@@ -160,14 +181,16 @@ export default function Home() {
             <p className="text-gray-500 mb-8">{APP_SUBTITLE}</p>
 
             <div className="bg-blue-50 p-6 rounded-lg mb-6">
-              <p className="font-bold text-gray-700 mb-2">出題数</p>
-              <div className="flex justify-center gap-2 flex-wrap">
-                {[5, 10, 20].map(num => (
+              <p className="font-bold text-gray-700 mb-3">出題数を選択 または 入力</p>
+              
+              {/* プリセットボタン */}
+              <div className="flex justify-center gap-2 flex-wrap mb-4">
+                {[5, 10, 20, 30].map(num => (
                   <button
                     key={num}
                     onClick={() => setSelectedCount(num)}
-                    className={`px-4 py-2 rounded-lg border-2 font-bold transition ${
-                      selectedCount === num ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'
+                    className={`px-3 py-1 rounded-md border-2 font-bold text-sm transition ${
+                      selectedCount === num ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
                     }`}
                   >
                     {num}問
@@ -175,13 +198,28 @@ export default function Home() {
                 ))}
                 <button
                     onClick={() => setSelectedCount(allQuestions.length)}
-                    className={`px-4 py-2 rounded-lg border-2 font-bold transition ${
-                      selectedCount === allQuestions.length ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200'
+                    className={`px-3 py-1 rounded-md border-2 font-bold text-sm transition ${
+                      selectedCount === allQuestions.length ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
                     }`}
                   >
                     全問
                   </button>
               </div>
+
+              {/* 手入力エリア（ここを追加しました！） */}
+              <div className="flex items-center justify-center gap-2">
+                <span className="text-sm font-bold text-gray-500">自由に指定:</span>
+                <input 
+                    type="number" 
+                    min="1" 
+                    max={allQuestions.length}
+                    value={selectedCount}
+                    onChange={handleCountChange}
+                    className="w-24 p-2 text-center text-xl font-bold border-2 border-gray-300 rounded-lg focus:border-blue-500 outline-none"
+                />
+                <span className="font-bold text-gray-600">問</span>
+              </div>
+              <p className="text-xs text-gray-400 mt-2">（最大 {allQuestions.length} 問まで）</p>
             </div>
 
             <div className="space-y-3">
