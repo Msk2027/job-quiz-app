@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import Papa from 'papaparse';
 
 // --- ★ここで「画面の真ん中」に表示する名前を変える ---
-const APP_TITLE = "就活マスターへの道";
+const APP_TITLE = "消費者行動論Ⅱの単位が欲しい";
 const APP_SUBTITLE = "自分だけの最強対策ドリル";
 // --------------------------------------------------
 
