@@ -3,6 +3,11 @@
 import { useState, useEffect } from 'react';
 import Papa from 'papaparse';
 
+// --- ★ここで「画面の真ん中」に表示する名前を変える ---
+const APP_TITLE = "就活マスターへの道";
+const APP_SUBTITLE = "自分だけの最強対策ドリル";
+// --------------------------------------------------
+
 // 型定義
 type Question = {
   question: string;
@@ -31,13 +36,10 @@ const shuffleArray = <T,>(array: T[]): T[] => {
 };
 
 export default function Home() {
-  // 画面状態: 'loading' | 'menu' | 'quiz' | 'result' | 'history'
   const [gameState, setGameState] = useState<'loading' | 'menu' | 'quiz' | 'result' | 'history'>('loading');
-  
   const [allQuestions, setAllQuestions] = useState<Question[]>([]);
   const [activeQuestions, setActiveQuestions] = useState<Question[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
-
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
   const [solvedQuestions, setSolvedQuestions] = useState<Set<number>>(new Set());
@@ -135,7 +137,6 @@ export default function Home() {
     setGameState('menu');
   };
 
-  // 履歴リセット機能
   const clearHistory = () => {
     if (confirm('履歴をすべて削除しますか？')) {
       setHistory([]);
@@ -155,8 +156,8 @@ export default function Home() {
         {/* === メニュー画面 === */}
         {gameState === 'menu' && (
           <div className="text-center w-full">
-            <h1 className="text-3xl md:text-4xl font-black text-blue-600 mb-2">Web適性検査</h1>
-            <p className="text-gray-500 mb-8">模擬テスト対策アプリ</p>
+            <h1 className="text-3xl md:text-4xl font-black text-blue-600 mb-2">{APP_TITLE}</h1>
+            <p className="text-gray-500 mb-8">{APP_SUBTITLE}</p>
 
             <div className="bg-blue-50 p-6 rounded-lg mb-6">
               <p className="font-bold text-gray-700 mb-2">出題数</p>
@@ -201,7 +202,7 @@ export default function Home() {
           </div>
         )}
 
-        {/* === 履歴画面（新規追加） === */}
+        {/* === 履歴画面 === */}
         {gameState === 'history' && (
           <div className="w-full h-full flex flex-col">
             <div className="flex justify-between items-center mb-6 border-b pb-4">
@@ -228,7 +229,6 @@ export default function Home() {
                 ))
               )}
             </div>
-
             {history.length > 0 && (
               <div className="mt-6 text-center">
                 <button onClick={clearHistory} className="text-xs text-red-400 underline hover:text-red-600">
