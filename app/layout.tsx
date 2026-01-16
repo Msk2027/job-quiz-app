@@ -6,7 +6,7 @@ const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
   // ★ここに「ブラウザのタブ」に表示したい名前を入れる
-  title: "消費者行動論絶対取るぞ",
+  title: "期末試験対策サイト",
   description: "自作の試験対策アプリ",
 };
 
