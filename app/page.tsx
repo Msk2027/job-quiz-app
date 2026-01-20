@@ -3,10 +3,10 @@
 import { useState, useEffect } from 'react';
 import Papa from 'papaparse';
 
-// --- ★設定エリア（ここを変更しました） ---
+// --- ★設定エリア ---
 const APP_TITLE = "期末試験対策";
 const APP_SUBTITLE = "消費者行動論Ⅱ";
-// ------------------------------------
+// ------------------
 
 // 型定義
 type Question = {
@@ -19,7 +19,6 @@ type Question = {
   explanation: string;
 };
 
-// 履歴に「間違えた問題リスト」を追加
 type MistakeRecord = {
   question: string;
   correctAnswer: string;
@@ -31,6 +30,12 @@ type HistoryItem = {
   total: number;
   mode: string;
   mistakes: MistakeRecord[];
+};
+
+// 選択肢表示用の型（シャッフル用）
+type DisplayOption = {
+  text: string;
+  originalIndex: number; // 元のCSVでの番号（1~4）
 };
 
 const shuffleArray = <T,>(array: T[]): T[] => {
@@ -51,16 +56,16 @@ export default function Home() {
   // クイズ中の状態
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isCorrect, setIsCorrect] = useState<boolean | null>(null);
-  const [userSelectedIndex, setUserSelectedIndex] = useState<number | null>(null);
+  const [userSelectedIndex, setUserSelectedIndex] = useState<number | null>(null); // 表示上のインデックス
   const [solvedQuestions, setSolvedQuestions] = useState<Set<number>>(new Set());
   
+  // ★シャッフルされた選択肢を保持するState
+  const [currentOptions, setCurrentOptions] = useState<DisplayOption[]>([]);
+
   // 設定
   const [selectedCount, setSelectedCount] = useState<number>(10);
-
-  // 履歴の開閉状態管理
   const [expandedHistoryIndex, setExpandedHistoryIndex] = useState<number | null>(null);
 
-  // ★あなたのスプレッドシートURL
   const SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vQyTaqBFKydSZeEcF8bJeYg95H_yfr1LcfeypU2ojVoTHxl2J9mJcacVRuu3u5MEmieYum_Pedg_Ptu/pub?gid=2142520007&single=true&output=csv';
 
   useEffect(() => {
@@ -72,6 +77,8 @@ export default function Home() {
         const data = results.data as Question[];
         if (data.length > 0) {
           setAllQuestions(data);
+          // 初期値として全問数を最大値にセットしたくない場合は10のまま、など調整可能
+          if (data.length < 10) setSelectedCount(data.length);
         }
         setGameState('menu');
       },
@@ -87,6 +94,17 @@ export default function Home() {
     }
   }, []);
 
+  // 選択肢を生成してシャッフルする関数
+  const generateShuffledOptions = (q: Question) => {
+    const opts: DisplayOption[] = [
+      { text: q.option1, originalIndex: 1 },
+      { text: q.option2, originalIndex: 2 },
+      { text: q.option3, originalIndex: 3 },
+      { text: q.option4, originalIndex: 4 },
+    ];
+    return shuffleArray(opts);
+  };
+
   const startQuiz = () => {
     if (selectedCount <= 0) {
         alert("出題数は1問以上にしてください");
@@ -101,18 +119,24 @@ export default function Home() {
     setSolvedQuestions(new Set());
     setIsCorrect(null);
     setUserSelectedIndex(null);
+    
+    // 最初の問題の選択肢をセット
+    setCurrentOptions(generateShuffledOptions(questionsToPlay[0]));
+    
     setGameState('quiz');
   };
 
-  const handleAnswer = (selectedOptionIndex: number) => {
+  // 回答処理
+  const handleAnswer = (displayIndex: number) => {
     if (isCorrect !== null) return;
     
-    setUserSelectedIndex(selectedOptionIndex);
+    setUserSelectedIndex(displayIndex);
 
-    const selectedNumber = String(selectedOptionIndex + 1);
-    const correctNumber = activeQuestions[currentIndex].answer;
-    const result = selectedNumber === correctNumber;
+    // シャッフルされた選択肢の中から、選んだものの originalIndex を取得
+    const selectedOriginalIndex = currentOptions[displayIndex].originalIndex;
+    const correctOriginalIndex = Number(activeQuestions[currentIndex].answer);
     
+    const result = selectedOriginalIndex === correctOriginalIndex;
     setIsCorrect(result);
 
     if (result) {
@@ -125,45 +149,72 @@ export default function Home() {
   };
 
   const handleNext = () => {
-    setIsCorrect(null);
-    setUserSelectedIndex(null);
     const nextIndex = currentIndex + 1;
     if (nextIndex < activeQuestions.length) {
+      setIsCorrect(null);
+      setUserSelectedIndex(null);
       setCurrentIndex(nextIndex);
+      // 次の問題の選択肢をシャッフルしてセット
+      setCurrentOptions(generateShuffledOptions(activeQuestions[nextIndex]));
     } else {
-      finishQuiz();
+      finishQuiz(false); // 通常終了
     }
   };
 
   const handlePrev = () => {
     if (currentIndex > 0) {
+      const prevIndex = currentIndex - 1;
       setIsCorrect(null);
       setUserSelectedIndex(null);
-      setCurrentIndex(currentIndex - 1);
+      setCurrentIndex(prevIndex);
+      // 前の問題の選択肢をシャッフルしてセット（※再シャッフルされます）
+      setCurrentOptions(generateShuffledOptions(activeQuestions[prevIndex]));
     }
   };
 
-  const finishQuiz = () => {
+  // 終了処理（isEarlyExit=trueなら途中終了）
+  const finishQuiz = (isEarlyExit: boolean) => {
+    // 途中終了の場合、解いた問題数（現在のインデックス+1、ただし未回答なら現在のインデックスまで）
+    // 今回は「現在表示中の問題を解いたかどうか」に関わらず、ここまで見た問題数を分母にする
+    // あるいは「正解数 / ここまで解こうとした数」にする
+    
+    let actualTotal = activeQuestions.length;
+    let modeText = activeQuestions.length === allQuestions.length ? "全問" : `${activeQuestions.length}問`;
+
+    if (isEarlyExit) {
+        // 途中終了なら、分母は「現在表示している問題まで」とする
+        // もし今の問題を回答済みなら currentIndex + 1、未回答なら currentIndex
+        const finishedCount = isCorrect !== null ? currentIndex + 1 : currentIndex;
+        if (finishedCount === 0) {
+            // 1問も解かずにやめる場合
+            backToMenu();
+            return;
+        }
+        actualTotal = finishedCount;
+        modeText += "(途中)";
+    }
+
     const score = solvedQuestions.size;
-    const total = activeQuestions.length;
     
     const mistakes: MistakeRecord[] = [];
-    activeQuestions.forEach((q, index) => {
-      if (!solvedQuestions.has(index)) {
-        const correctIndex = Number(q.answer) - 1;
-        const options = [q.option1, q.option2, q.option3, q.option4];
-        mistakes.push({
-          question: q.question,
-          correctAnswer: options[correctIndex] || `選択肢${q.answer}`
-        });
-      }
-    });
+    // 途中終了の場合は、actualTotalまでチェックする
+    for (let i = 0; i < actualTotal; i++) {
+        if (!solvedQuestions.has(i)) {
+            const q = activeQuestions[i];
+            const correctIndex = Number(q.answer) - 1;
+            const options = [q.option1, q.option2, q.option3, q.option4];
+            mistakes.push({
+                question: q.question,
+                correctAnswer: options[correctIndex] || `選択肢${q.answer}`
+            });
+        }
+    }
 
     const newHistoryItem: HistoryItem = {
       date: new Date().toLocaleString('ja-JP'),
       score: score,
-      total: total,
-      mode: total === allQuestions.length ? "全問" : `${total}問`,
+      total: actualTotal,
+      mode: modeText,
       mistakes: mistakes
     };
 
@@ -186,15 +237,11 @@ export default function Home() {
 
   const handleCountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = Number(e.target.value);
-    if (val >= 0) setSelectedCount(val);
+    if (val >= 0 && val <= allQuestions.length) setSelectedCount(val);
   };
 
   const toggleHistoryDetail = (index: number) => {
-    if (expandedHistoryIndex === index) {
-      setExpandedHistoryIndex(null);
-    } else {
-      setExpandedHistoryIndex(index);
-    }
+    setExpandedHistoryIndex(expandedHistoryIndex === index ? null : index);
   };
 
   const currentScore = solvedQuestions.size;
@@ -213,30 +260,25 @@ export default function Home() {
             <p className="text-gray-500 mb-8">{APP_SUBTITLE}</p>
 
             <div className="bg-blue-50 p-6 rounded-lg mb-6">
-              <p className="font-bold text-gray-700 mb-3">出題数</p>
-              <div className="flex justify-center gap-2 flex-wrap mb-4">
-                {[5, 10, 20, 30].map(num => (
-                  <button
-                    key={num}
-                    onClick={() => setSelectedCount(num)}
-                    className={`px-3 py-1 rounded-md border-2 font-bold text-sm transition ${
-                      selectedCount === num ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
-                    }`}
-                  >
-                    {num}問
-                  </button>
-                ))}
-                <button
-                    onClick={() => setSelectedCount(allQuestions.length)}
-                    className={`px-3 py-1 rounded-md border-2 font-bold text-sm transition ${
-                      selectedCount === allQuestions.length ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400'
-                    }`}
-                  >
-                    全問
-                  </button>
+              <p className="font-bold text-gray-700 mb-4">出題数: {selectedCount}問</p>
+              
+              {/* ★スライダー実装 */}
+              <div className="flex items-center gap-4 mb-4">
+                <span className="text-sm text-gray-400 font-bold">1</span>
+                <input 
+                  type="range" 
+                  min="1" 
+                  max={allQuestions.length} 
+                  value={selectedCount} 
+                  onChange={handleCountChange}
+                  className="w-full h-2 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600"
+                />
+                <span className="text-sm text-gray-400 font-bold">{allQuestions.length}</span>
               </div>
+
+              {/* 手入力エリア */}
               <div className="flex items-center justify-center gap-2">
-                <span className="text-sm font-bold text-gray-500">指定:</span>
+                <span className="text-sm font-bold text-gray-500">直接入力:</span>
                 <input 
                     type="number" 
                     min="1" 
@@ -323,10 +365,21 @@ export default function Home() {
         {gameState === 'quiz' && currentQ && (
           <>
             <div className="flex justify-between items-center mb-6 border-b pb-4">
-              <button onClick={backToMenu} className="text-xs text-gray-400 hover:text-gray-600">中断</button>
-              <span className="text-sm font-bold text-blue-600">
-                {currentIndex + 1} / {activeQuestions.length} 問
-              </span>
+              <button onClick={backToMenu} className="text-xs text-gray-400 hover:text-gray-600">
+                &larr; メニューへ戻る（保存しない）
+              </button>
+              <div className="flex items-center gap-4">
+                 <span className="text-sm font-bold text-blue-600">
+                    {currentIndex + 1} / {activeQuestions.length} 問
+                 </span>
+                 {/* ★途中終了ボタン */}
+                 <button 
+                    onClick={() => finishQuiz(true)}
+                    className="text-xs bg-red-100 text-red-600 px-3 py-1 rounded-full font-bold hover:bg-red-200 transition"
+                 >
+                    中断して記録
+                 </button>
+              </div>
             </div>
             
             <h2 className="text-xl font-bold mb-8 leading-relaxed whitespace-pre-wrap">
@@ -334,14 +387,15 @@ export default function Home() {
             </h2>
 
             <div className="grid gap-4 mb-6">
-              {[currentQ.option1, currentQ.option2, currentQ.option3, currentQ.option4].map((option, index) => {
+              {/* シャッフルされた選択肢（currentOptions）を表示 */}
+              {currentOptions.map((opt, displayIndex) => {
                 let btnClass = "border-gray-200 hover:bg-blue-50";
-                let badge = <span className="inline-block w-6 h-6 bg-gray-200 text-gray-600 text-center leading-6 rounded-full text-xs mr-3">{index + 1}</span>;
+                let badge = <span className="inline-block w-6 h-6 bg-gray-200 text-gray-600 text-center leading-6 rounded-full text-xs mr-3">{displayIndex + 1}</span>;
 
                 if (isCorrect !== null) {
-                   const correctNum = Number(currentQ.answer) - 1;
-                   const isThisCorrect = index === correctNum;
-                   const isThisSelected = index === userSelectedIndex;
+                   const correctOriginalIndex = Number(currentQ.answer); // 1~4
+                   const isThisCorrect = opt.originalIndex === correctOriginalIndex;
+                   const isThisSelected = displayIndex === userSelectedIndex;
 
                    if (isThisCorrect) {
                      btnClass = "bg-green-100 border-green-400 text-green-800 font-bold";
@@ -355,9 +409,9 @@ export default function Home() {
                 }
 
                 return (
-                  <button key={index} onClick={() => handleAnswer(index)} disabled={isCorrect !== null} className={`p-4 text-left border-2 rounded-lg transition-all ${btnClass}`}>
+                  <button key={displayIndex} onClick={() => handleAnswer(displayIndex)} disabled={isCorrect !== null} className={`p-4 text-left border-2 rounded-lg transition-all ${btnClass}`}>
                     {badge}
-                    {option}
+                    {opt.text}
                   </button>
                 );
               })}
@@ -393,13 +447,14 @@ export default function Home() {
           <div className="text-center py-6">
             <h2 className="text-3xl font-bold mb-2">結果発表</h2>
             <div className="text-6xl font-black text-blue-600 mb-4">
-              {currentScore} <span className="text-2xl text-gray-400">/ {activeQuestions.length}</span>
+              {/* スコア表示の分母を、実際に回答した問題数(historyの最新から取得)に合わせる */}
+              {currentScore} <span className="text-2xl text-gray-400">/ {history[0]?.total || activeQuestions.length}</span>
             </div>
             <p className="mb-8 text-xl font-bold text-gray-700">
-              正答率: {Math.round((currentScore / activeQuestions.length) * 100)}%
+              正答率: {Math.round((currentScore / (history[0]?.total || activeQuestions.length)) * 100)}%
             </p>
             <div className="flex flex-col gap-3 max-w-xs mx-auto">
-              <button onClick={startQuiz} className="bg-blue-600 text-white px-8 py-3 rounded-full font-bold hover:bg-blue-700 transition">再挑戦</button>
+              <button onClick={startQuiz} className="bg-blue-600 text-white px-8 py-3 rounded-full font-bold hover:bg-blue-700 transition">同じ設定で再挑戦</button>
               <button onClick={() => setGameState('history')} className="bg-white border-2 border-gray-300 text-gray-600 px-8 py-3 rounded-full font-bold hover:bg-gray-50 transition">履歴を見る</button>
               <button onClick={backToMenu} className="text-gray-400 underline mt-2 text-sm hover:text-gray-600">トップに戻る</button>
             </div>
