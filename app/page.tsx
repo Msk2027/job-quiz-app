@@ -1,238 +1,33 @@
 "use client";
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
-import Papa from "papaparse";
-import * as XLSX from "xlsx";
-import { isSupabaseConfigured, supabase } from "@/lib/supabase";
+import { useMemo, useState } from "react";
+import { AuthScreen } from "@/components/auth-screen";
+import { useStudySync } from "@/hooks/use-study-sync";
+import { blankQuestion, loadSheet, typeName } from "@/lib/questions";
+import { isSupabaseConfigured } from "@/lib/supabase";
+import type {
+  Attempt,
+  EssayGrading,
+  QType,
+  Question,
+  Subject,
+} from "@/lib/study-types";
 
-type QType = "choice" | "ox" | "fill" | "essay";
-type Question = {
-  id: string;
-  type: QType;
-  question: string;
-  options: string[];
-  answer: string;
-  explanation: string;
-  modelAnswer: string;
-  rubric: string;
-};
-type Subject = {
-  id: string;
-  name: string;
-  color: string;
-  source?: { url: string; mode: "sync" | "copy" };
-  questions: Question[];
-};
-type AnswerRecord = {
-  questionId: string;
-  question?: string;
-  type?: QType;
-  answer: string;
-  correct: boolean | null;
-  correctAnswer?: string;
-  explanation?: string;
-  modelAnswer?: string;
-  rubric?: string;
-  grading?: EssayGrading;
-};
-type EssayGrading = {
-  score: number;
-  assessment: string;
-  goodPoints: string;
-  missingPoints: string;
-  improvedAnswer: string;
-  importedAt: string;
-};
-type Attempt = {
-  id: string;
-  subjectId: string;
-  date: string;
-  score: number;
-  total: number;
-  answers: AnswerRecord[];
-  status?: "completed" | "interrupted";
-};
 type PendingImport = { name: string; url: string };
-type SyncStatus = "loading" | "saved" | "saving" | "error" | "offline";
-const SUBJECTS = "study_subjects_v2",
-  ATTEMPTS = "study_attempts_v2";
-const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
-const serializeStudyData = (subjects: Subject[], attempts: Attempt[]) =>
-  JSON.stringify({ subjects, attempts });
 const uid = () => crypto.randomUUID();
-const stableId = (value: string) => {
-  let hash = 2166136261;
-  for (let i = 0; i < value.length; i++) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `auto-${(hash >>> 0).toString(36)}`;
-};
-const blankQ = (): Question => ({
-  id: uid(),
-  type: "choice",
-  question: "",
-  options: ["", "", "", ""],
-  answer: "",
-  explanation: "",
-  modelAnswer: "",
-  rubric: "",
-});
-const typeName: Record<QType, string> = {
-  choice: "4択",
-  ox: "○×",
-  fill: "穴埋め",
-  essay: "論述",
-};
-
-function rowToQuestion(r: Record<string, string>): Question | null {
-  const question = (r.question || r.問題文 || "").trim();
-  if (!question) return null;
-  const raw = (r.type || r.形式 || "choice").toLowerCase();
-  const type: QType =
-    raw === "ox" || raw === "○×"
-      ? "ox"
-      : raw === "fill" || raw === "穴埋め"
-        ? "fill"
-        : raw === "essay" || raw === "論述"
-          ? "essay"
-          : "choice";
-  return {
-    id: (r.id || r.ID || "").trim() || stableId(`${type}:${question}`),
-    type,
-    question,
-    options: [r.option1, r.option2, r.option3, r.option4].filter(Boolean),
-    answer: r.answer || r.正解 || "",
-    explanation: r.explanation || r.解説 || "",
-    modelAnswer: r.modelAnswer || r.模範解答 || "",
-    rubric: r.rubric || r.採点ポイント || "",
-  };
-}
-async function loadSheet(url: string) {
-  return new Promise<Question[]>((resolve, reject) =>
-    Papa.parse<Record<string, string>>(url, {
-      download: true,
-      header: true,
-      skipEmptyLines: true,
-      complete: (r) =>
-        resolve(r.data.map(rowToQuestion).filter((q): q is Question => !!q)),
-      error: reject,
-    }),
-  );
-}
-
-function AuthScreen() {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [mode, setMode] = useState<"login" | "signup">("login");
-  const [loading, setLoading] = useState(false);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-
-  async function submitAuth(event: FormEvent) {
-    event.preventDefault();
-    if (!supabase) return;
-    setLoading(true);
-    setError("");
-    setMessage("");
-    const result =
-      mode === "login"
-        ? await supabase.auth.signInWithPassword({ email, password })
-        : await supabase.auth.signUp({ email, password });
-    setLoading(false);
-    if (result.error) {
-      const messages: Record<string, string> = {
-        "Invalid login credentials":
-          "メールアドレスまたはパスワードが違います。",
-        "Email not confirmed": "確認メール内のリンクを先に開いてください。",
-        "User already registered": "このメールアドレスは登録済みです。",
-        "Password should be at least 6 characters":
-          "パスワードは6文字以上にしてください。",
-      };
-      setError(messages[result.error.message] || result.error.message);
-      return;
-    }
-    if (mode === "signup" && !result.data.session) {
-      setMessage(
-        "確認メールを送りました。メール内のリンクを開いてからログインしてください。",
-      );
-    }
-  }
-
-  return (
-    <main className="min-h-screen grid place-items-center p-4 bg-gray-50">
-      <div className="card w-full max-w-md p-7 md:p-9">
-        <p className="text-sm font-bold text-blue-700">Study Studio</p>
-        <h1 className="mt-2 text-3xl font-black">
-          {mode === "login" ? "ログイン" : "アカウント作成"}
-        </h1>
-        <p className="mt-2 text-sm text-gray-500">
-          科目・問題・結果履歴を端末間で同期します
-        </p>
-        <form onSubmit={submitAuth} className="mt-7 space-y-4">
-          <label className="block text-sm font-bold">
-            メールアドレス
-            <input
-              type="email"
-              required
-              autoComplete="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              className="mt-2 block w-full rounded-lg border p-3 font-normal"
-            />
-          </label>
-          <label className="block text-sm font-bold">
-            パスワード
-            <input
-              type="password"
-              required
-              minLength={6}
-              autoComplete={
-                mode === "login" ? "current-password" : "new-password"
-              }
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              className="mt-2 block w-full rounded-lg border p-3 font-normal"
-            />
-          </label>
-          {error && (
-            <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
-              {error}
-            </p>
-          )}
-          {message && (
-            <p className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
-              {message}
-            </p>
-          )}
-          <button
-            disabled={loading}
-            className="w-full rounded-xl bg-blue-600 py-3 font-bold text-white disabled:bg-gray-300"
-          >
-            {loading ? "処理中…" : mode === "login" ? "ログイン" : "登録する"}
-          </button>
-        </form>
-        <button
-          onClick={() => {
-            setMode(mode === "login" ? "signup" : "login");
-            setError("");
-            setMessage("");
-          }}
-          className="mt-5 w-full text-sm font-bold text-blue-700"
-        >
-          {mode === "login"
-            ? "初めての方：アカウントを作成"
-            : "登録済みの方：ログインへ戻る"}
-        </button>
-      </div>
-    </main>
-  );
-}
 
 export default function Home() {
-  const [ready, setReady] = useState(false),
-    [subjects, setSubjects] = useState<Subject[]>([]),
-    [attempts, setAttempts] = useState<Attempt[]>([]);
+  const {
+    ready,
+    subjects,
+    setSubjects,
+    attempts,
+    setAttempts,
+    session,
+    authChecked,
+    syncStatus,
+    retrySync,
+    signOut: signOutCloud,
+  } = useStudySync();
   const [view, setView] = useState<
       "home" | "subject" | "manage" | "play" | "result"
     >("home"),
@@ -259,183 +54,6 @@ export default function Home() {
     ]),
     [studyCount, setStudyCount] = useState(1),
     [lastInterrupted, setLastInterrupted] = useState(false);
-  const [session, setSession] = useState<Session | null>(null),
-    [authChecked, setAuthChecked] = useState(!isSupabaseConfigured),
-    [cloudReady, setCloudReady] = useState(!isSupabaseConfigured),
-    [syncStatus, setSyncStatus] = useState<SyncStatus>(
-      isSupabaseConfigured ? "loading" : "offline",
-    ),
-    [syncRetry, setSyncRetry] = useState(0);
-  const lastSyncedData = useRef("");
-  const sessionUserId = session?.user.id;
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      try {
-        setSubjects(JSON.parse(localStorage.getItem(SUBJECTS) || "[]"));
-        setAttempts(JSON.parse(localStorage.getItem(ATTEMPTS) || "[]"));
-      } catch {}
-      setReady(true);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, []);
-  useEffect(() => {
-    if (!ready) return;
-    if (session) {
-      localStorage.setItem(
-        userCacheKey(SUBJECTS, session.user.id),
-        JSON.stringify(subjects),
-      );
-    } else if (!isSupabaseConfigured) {
-      localStorage.setItem(SUBJECTS, JSON.stringify(subjects));
-    }
-  }, [subjects, ready, session]);
-  useEffect(() => {
-    if (!ready) return;
-    if (session) {
-      localStorage.setItem(
-        userCacheKey(ATTEMPTS, session.user.id),
-        JSON.stringify(attempts),
-      );
-    } else if (!isSupabaseConfigured) {
-      localStorage.setItem(ATTEMPTS, JSON.stringify(attempts));
-    }
-  }, [attempts, ready, session]);
-  useEffect(() => {
-    if (!ready || !supabase) return;
-    let active = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session);
-      setAuthChecked(true);
-      if (!data.session) setSyncStatus("offline");
-    });
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, nextSession) => {
-      if (!active) return;
-      setSession(nextSession);
-      setAuthChecked(true);
-      if (nextSession && event === "SIGNED_IN") {
-        setCloudReady(false);
-        setSyncStatus("loading");
-      } else if (!nextSession) {
-        setCloudReady(false);
-        setSyncStatus("offline");
-      }
-    });
-    return () => {
-      active = false;
-      subscription.unsubscribe();
-    };
-  }, [ready]);
-  useEffect(() => {
-    if (!ready || !supabase || !sessionUserId) return;
-    let active = true;
-    const userId = sessionUserId;
-    async function loadCloudData() {
-      const cachedSubjects: Subject[] = JSON.parse(
-        localStorage.getItem(userCacheKey(SUBJECTS, userId)) ||
-          localStorage.getItem(SUBJECTS) ||
-          "[]",
-      );
-      const cachedAttempts: Attempt[] = JSON.parse(
-        localStorage.getItem(userCacheKey(ATTEMPTS, userId)) ||
-          localStorage.getItem(ATTEMPTS) ||
-          "[]",
-      );
-      await Promise.resolve();
-      if (cachedSubjects.length || cachedAttempts.length) {
-        setSubjects(cachedSubjects);
-        setAttempts(cachedAttempts);
-      }
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 8000);
-      const { data, error } = await supabase!
-        .from("user_data")
-        .select("subjects, attempts")
-        .eq("user_id", userId)
-        .abortSignal(controller.signal)
-        .maybeSingle();
-      window.clearTimeout(timeout);
-      if (!active) return;
-      if (error) {
-        setSyncStatus("error");
-        setCloudReady(false);
-        return;
-      }
-      const remoteSubjects: Subject[] =
-        data && Array.isArray(data.subjects) ? data.subjects : [];
-      const remoteAttempts: Attempt[] =
-        data && Array.isArray(data.attempts) ? data.attempts : [];
-      const shouldMigrateLocalData =
-        cachedSubjects.length + cachedAttempts.length > 0 &&
-        remoteSubjects.length + remoteAttempts.length === 0;
-      if (!data || shouldMigrateLocalData) {
-        const { error: migrationError } = await supabase!
-          .from("user_data")
-          .upsert({
-            user_id: userId,
-            subjects: cachedSubjects,
-            attempts: cachedAttempts,
-            updated_at: new Date().toISOString(),
-          });
-        if (!active) return;
-        if (migrationError) {
-          setSyncStatus("error");
-          setCloudReady(true);
-          return;
-        }
-        lastSyncedData.current = serializeStudyData(
-          cachedSubjects,
-          cachedAttempts,
-        );
-        setSubjects(cachedSubjects);
-        setAttempts(cachedAttempts);
-      } else {
-        lastSyncedData.current = serializeStudyData(
-          remoteSubjects,
-          remoteAttempts,
-        );
-        setSubjects(remoteSubjects);
-        setAttempts(remoteAttempts);
-      }
-      localStorage.removeItem(SUBJECTS);
-      localStorage.removeItem(ATTEMPTS);
-      setSyncStatus("saved");
-      setCloudReady(true);
-    }
-    loadCloudData().catch(() => {
-      if (active) {
-        setSyncStatus("error");
-        setCloudReady(false);
-      }
-    });
-    return () => {
-      active = false;
-    };
-  }, [ready, sessionUserId, syncRetry]);
-  useEffect(() => {
-    if (!supabase || !sessionUserId || !cloudReady) return;
-    const serialized = serializeStudyData(subjects, attempts);
-    if (serialized === lastSyncedData.current) return;
-    const client = supabase;
-    const timer = window.setTimeout(async () => {
-      setSyncStatus("saving");
-      const { error } = await client.from("user_data").upsert({
-        user_id: sessionUserId,
-        subjects,
-        attempts,
-        updated_at: new Date().toISOString(),
-      });
-      if (error) {
-        setSyncStatus("error");
-      } else {
-        lastSyncedData.current = serialized;
-        setSyncStatus("saved");
-      }
-    }, 700);
-    return () => window.clearTimeout(timer);
-  }, [subjects, attempts, sessionUserId, cloudReady]);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
     () => attempts.filter((a) => a.subjectId === selected),
@@ -450,10 +68,7 @@ export default function Home() {
         : [...v, s],
     );
   async function signOut() {
-    if (!supabase) return;
-    await supabase.auth.signOut();
-    setSubjects([]);
-    setAttempts([]);
+    await signOutCloud();
     setSelected("");
     setView("home");
   }
@@ -735,6 +350,7 @@ export default function Home() {
   }
   async function importEssayGrades(file: File, attemptId: string) {
     try {
+      const XLSX = await import("xlsx");
       const data = await file.arrayBuffer();
       const workbook = XLSX.read(data, { type: "array" });
       const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -803,10 +419,7 @@ export default function Home() {
             <div>
               {syncStatus === "error" ? (
                 <button
-                  onClick={() => {
-                    setSyncStatus("loading");
-                    setSyncRetry((value) => value + 1);
-                  }}
+                  onClick={retrySync}
                   className="text-xs font-bold text-amber-300"
                 >
                   同期エラー・再試行
@@ -1141,7 +754,7 @@ export default function Home() {
             <div className="flex justify-between mb-5">
               <button onClick={() => setView("subject")}>← 科目へ</button>
               <button
-                onClick={() => setEditing(blankQ())}
+                onClick={() => setEditing(blankQuestion())}
                 className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold"
               >
                 ＋ 問題作成
