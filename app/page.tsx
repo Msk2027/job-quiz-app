@@ -329,6 +329,16 @@ export default function Home() {
     let active = true;
     const userId = sessionUserId;
     async function loadCloudData() {
+      const cachedSubjects: Subject[] = JSON.parse(
+        localStorage.getItem(userCacheKey(SUBJECTS, userId)) ||
+          localStorage.getItem(SUBJECTS) ||
+          "[]",
+      );
+      const cachedAttempts: Attempt[] = JSON.parse(
+        localStorage.getItem(userCacheKey(ATTEMPTS, userId)) ||
+          localStorage.getItem(ATTEMPTS) ||
+          "[]",
+      );
       const { data, error } = await supabase!
         .from("user_data")
         .select("subjects, attempts")
@@ -340,20 +350,14 @@ export default function Home() {
         setCloudReady(true);
         return;
       }
-      if (data) {
-        setSubjects(Array.isArray(data.subjects) ? data.subjects : []);
-        setAttempts(Array.isArray(data.attempts) ? data.attempts : []);
-      } else {
-        const cachedSubjects = JSON.parse(
-          localStorage.getItem(userCacheKey(SUBJECTS, userId)) ||
-            localStorage.getItem(SUBJECTS) ||
-            "[]",
-        );
-        const cachedAttempts = JSON.parse(
-          localStorage.getItem(userCacheKey(ATTEMPTS, userId)) ||
-            localStorage.getItem(ATTEMPTS) ||
-            "[]",
-        );
+      const remoteSubjects: Subject[] =
+        data && Array.isArray(data.subjects) ? data.subjects : [];
+      const remoteAttempts: Attempt[] =
+        data && Array.isArray(data.attempts) ? data.attempts : [];
+      const shouldMigrateLocalData =
+        cachedSubjects.length + cachedAttempts.length > 0 &&
+        remoteSubjects.length + remoteAttempts.length === 0;
+      if (!data || shouldMigrateLocalData) {
         const { error: migrationError } = await supabase!
           .from("user_data")
           .upsert({
@@ -370,6 +374,9 @@ export default function Home() {
         }
         setSubjects(cachedSubjects);
         setAttempts(cachedAttempts);
+      } else {
+        setSubjects(remoteSubjects);
+        setAttempts(remoteAttempts);
       }
       localStorage.removeItem(SUBJECTS);
       localStorage.removeItem(ATTEMPTS);
