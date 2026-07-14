@@ -262,7 +262,8 @@ export default function Home() {
     [cloudReady, setCloudReady] = useState(!isSupabaseConfigured),
     [syncStatus, setSyncStatus] = useState<SyncStatus>(
       isSupabaseConfigured ? "loading" : "offline",
-    );
+    ),
+    [syncRetry, setSyncRetry] = useState(0);
   const sessionUserId = session?.user.id;
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -339,15 +340,24 @@ export default function Home() {
           localStorage.getItem(ATTEMPTS) ||
           "[]",
       );
+      await Promise.resolve();
+      if (cachedSubjects.length || cachedAttempts.length) {
+        setSubjects(cachedSubjects);
+        setAttempts(cachedAttempts);
+      }
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 8000);
       const { data, error } = await supabase!
         .from("user_data")
         .select("subjects, attempts")
         .eq("user_id", userId)
+        .abortSignal(controller.signal)
         .maybeSingle();
+      window.clearTimeout(timeout);
       if (!active) return;
       if (error) {
         setSyncStatus("error");
-        setCloudReady(true);
+        setCloudReady(false);
         return;
       }
       const remoteSubjects: Subject[] =
@@ -386,13 +396,13 @@ export default function Home() {
     loadCloudData().catch(() => {
       if (active) {
         setSyncStatus("error");
-        setCloudReady(true);
+        setCloudReady(false);
       }
     });
     return () => {
       active = false;
     };
-  }, [ready, sessionUserId]);
+  }, [ready, sessionUserId, syncRetry]);
   useEffect(() => {
     if (!supabase || !sessionUserId || !cloudReady) return;
     const client = supabase;
@@ -761,12 +771,6 @@ export default function Home() {
       <main className="min-h-screen grid place-items-center">読み込み中…</main>
     );
   if (isSupabaseConfigured && !session) return <AuthScreen />;
-  if (isSupabaseConfigured && !cloudReady)
-    return (
-      <main className="min-h-screen grid place-items-center">
-        クラウドデータを読み込み中…
-      </main>
-    );
   return (
     <main className="min-h-screen">
       <header className="bg-[#17233f] text-white px-5 py-4">
@@ -779,17 +783,27 @@ export default function Home() {
           </button>
           <div className="flex items-center gap-3 text-right">
             <div>
-              <p className="text-xs text-blue-200">
-                {syncStatus === "saved"
-                  ? "クラウドに保存済み"
-                  : syncStatus === "saving"
-                    ? "保存中…"
-                    : syncStatus === "error"
-                      ? "同期エラー"
+              {syncStatus === "error" ? (
+                <button
+                  onClick={() => {
+                    setSyncStatus("loading");
+                    setSyncRetry((value) => value + 1);
+                  }}
+                  className="text-xs font-bold text-amber-300"
+                >
+                  同期エラー・再試行
+                </button>
+              ) : (
+                <p className="text-xs text-blue-200">
+                  {syncStatus === "saved"
+                    ? "クラウドに保存済み"
+                    : syncStatus === "saving"
+                      ? "保存中…"
                       : syncStatus === "loading"
                         ? "同期中…"
                         : "端末内に保存"}
-              </p>
+                </p>
+              )}
               {session?.user.email && (
                 <p className="hidden text-xs text-white/70 sm:block">
                   {session.user.email}
