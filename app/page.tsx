@@ -1,7 +1,9 @@
 "use client";
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
+import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 
 type QType = "choice" | "ox" | "fill" | "essay";
 type Question = {
@@ -51,8 +53,10 @@ type Attempt = {
   status?: "completed" | "interrupted";
 };
 type PendingImport = { name: string; url: string };
+type SyncStatus = "loading" | "saved" | "saving" | "error" | "offline";
 const SUBJECTS = "study_subjects_v2",
   ATTEMPTS = "study_attempts_v2";
+const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
 const uid = () => crypto.randomUUID();
 const stableId = (value: string) => {
   let hash = 2166136261;
@@ -115,6 +119,114 @@ async function loadSheet(url: string) {
   );
 }
 
+function AuthScreen() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  async function submitAuth(event: FormEvent) {
+    event.preventDefault();
+    if (!supabase) return;
+    setLoading(true);
+    setError("");
+    setMessage("");
+    const result =
+      mode === "login"
+        ? await supabase.auth.signInWithPassword({ email, password })
+        : await supabase.auth.signUp({ email, password });
+    setLoading(false);
+    if (result.error) {
+      const messages: Record<string, string> = {
+        "Invalid login credentials":
+          "メールアドレスまたはパスワードが違います。",
+        "Email not confirmed": "確認メール内のリンクを先に開いてください。",
+        "User already registered": "このメールアドレスは登録済みです。",
+        "Password should be at least 6 characters":
+          "パスワードは6文字以上にしてください。",
+      };
+      setError(messages[result.error.message] || result.error.message);
+      return;
+    }
+    if (mode === "signup" && !result.data.session) {
+      setMessage(
+        "確認メールを送りました。メール内のリンクを開いてからログインしてください。",
+      );
+    }
+  }
+
+  return (
+    <main className="min-h-screen grid place-items-center p-4 bg-gray-50">
+      <div className="card w-full max-w-md p-7 md:p-9">
+        <p className="text-sm font-bold text-blue-700">Study Studio</p>
+        <h1 className="mt-2 text-3xl font-black">
+          {mode === "login" ? "ログイン" : "アカウント作成"}
+        </h1>
+        <p className="mt-2 text-sm text-gray-500">
+          科目・問題・結果履歴を端末間で同期します
+        </p>
+        <form onSubmit={submitAuth} className="mt-7 space-y-4">
+          <label className="block text-sm font-bold">
+            メールアドレス
+            <input
+              type="email"
+              required
+              autoComplete="email"
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              className="mt-2 block w-full rounded-lg border p-3 font-normal"
+            />
+          </label>
+          <label className="block text-sm font-bold">
+            パスワード
+            <input
+              type="password"
+              required
+              minLength={6}
+              autoComplete={
+                mode === "login" ? "current-password" : "new-password"
+              }
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              className="mt-2 block w-full rounded-lg border p-3 font-normal"
+            />
+          </label>
+          {error && (
+            <p className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
+              {error}
+            </p>
+          )}
+          {message && (
+            <p className="rounded-lg bg-green-50 p-3 text-sm text-green-700">
+              {message}
+            </p>
+          )}
+          <button
+            disabled={loading}
+            className="w-full rounded-xl bg-blue-600 py-3 font-bold text-white disabled:bg-gray-300"
+          >
+            {loading ? "処理中…" : mode === "login" ? "ログイン" : "登録する"}
+          </button>
+        </form>
+        <button
+          onClick={() => {
+            setMode(mode === "login" ? "signup" : "login");
+            setError("");
+            setMessage("");
+          }}
+          className="mt-5 w-full text-sm font-bold text-blue-700"
+        >
+          {mode === "login"
+            ? "初めての方：アカウントを作成"
+            : "登録済みの方：ログインへ戻る"}
+        </button>
+      </div>
+    </main>
+  );
+}
+
 export default function Home() {
   const [ready, setReady] = useState(false),
     [subjects, setSubjects] = useState<Subject[]>([]),
@@ -145,6 +257,13 @@ export default function Home() {
     ]),
     [studyCount, setStudyCount] = useState(1),
     [lastInterrupted, setLastInterrupted] = useState(false);
+  const [session, setSession] = useState<Session | null>(null),
+    [authChecked, setAuthChecked] = useState(!isSupabaseConfigured),
+    [cloudReady, setCloudReady] = useState(!isSupabaseConfigured),
+    [syncStatus, setSyncStatus] = useState<SyncStatus>(
+      isSupabaseConfigured ? "loading" : "offline",
+    );
+  const sessionUserId = session?.user.id;
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
@@ -156,11 +275,132 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, []);
   useEffect(() => {
-    if (ready) localStorage.setItem(SUBJECTS, JSON.stringify(subjects));
-  }, [subjects, ready]);
+    if (!ready) return;
+    if (session) {
+      localStorage.setItem(
+        userCacheKey(SUBJECTS, session.user.id),
+        JSON.stringify(subjects),
+      );
+    } else if (!isSupabaseConfigured) {
+      localStorage.setItem(SUBJECTS, JSON.stringify(subjects));
+    }
+  }, [subjects, ready, session]);
   useEffect(() => {
-    if (ready) localStorage.setItem(ATTEMPTS, JSON.stringify(attempts));
-  }, [attempts, ready]);
+    if (!ready) return;
+    if (session) {
+      localStorage.setItem(
+        userCacheKey(ATTEMPTS, session.user.id),
+        JSON.stringify(attempts),
+      );
+    } else if (!isSupabaseConfigured) {
+      localStorage.setItem(ATTEMPTS, JSON.stringify(attempts));
+    }
+  }, [attempts, ready, session]);
+  useEffect(() => {
+    if (!ready || !supabase) return;
+    let active = true;
+    supabase.auth.getSession().then(({ data }) => {
+      if (!active) return;
+      setSession(data.session);
+      setAuthChecked(true);
+      if (!data.session) setSyncStatus("offline");
+    });
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, nextSession) => {
+      if (!active) return;
+      setSession(nextSession);
+      setAuthChecked(true);
+      if (nextSession && event === "SIGNED_IN") {
+        setCloudReady(false);
+        setSyncStatus("loading");
+      } else if (!nextSession) {
+        setCloudReady(false);
+        setSyncStatus("offline");
+      }
+    });
+    return () => {
+      active = false;
+      subscription.unsubscribe();
+    };
+  }, [ready]);
+  useEffect(() => {
+    if (!ready || !supabase || !sessionUserId) return;
+    let active = true;
+    const userId = sessionUserId;
+    async function loadCloudData() {
+      const { data, error } = await supabase!
+        .from("user_data")
+        .select("subjects, attempts")
+        .eq("user_id", userId)
+        .maybeSingle();
+      if (!active) return;
+      if (error) {
+        setSyncStatus("error");
+        setCloudReady(true);
+        return;
+      }
+      if (data) {
+        setSubjects(Array.isArray(data.subjects) ? data.subjects : []);
+        setAttempts(Array.isArray(data.attempts) ? data.attempts : []);
+      } else {
+        const cachedSubjects = JSON.parse(
+          localStorage.getItem(userCacheKey(SUBJECTS, userId)) ||
+            localStorage.getItem(SUBJECTS) ||
+            "[]",
+        );
+        const cachedAttempts = JSON.parse(
+          localStorage.getItem(userCacheKey(ATTEMPTS, userId)) ||
+            localStorage.getItem(ATTEMPTS) ||
+            "[]",
+        );
+        const { error: migrationError } = await supabase!
+          .from("user_data")
+          .upsert({
+            user_id: userId,
+            subjects: cachedSubjects,
+            attempts: cachedAttempts,
+            updated_at: new Date().toISOString(),
+          });
+        if (!active) return;
+        if (migrationError) {
+          setSyncStatus("error");
+          setCloudReady(true);
+          return;
+        }
+        setSubjects(cachedSubjects);
+        setAttempts(cachedAttempts);
+      }
+      localStorage.removeItem(SUBJECTS);
+      localStorage.removeItem(ATTEMPTS);
+      setSyncStatus("saved");
+      setCloudReady(true);
+    }
+    loadCloudData().catch(() => {
+      if (active) {
+        setSyncStatus("error");
+        setCloudReady(true);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [ready, sessionUserId]);
+  useEffect(() => {
+    if (!supabase || !sessionUserId || !cloudReady) return;
+    const client = supabase;
+    const timer = window.setTimeout(async () => {
+      setSyncStatus("saving");
+      const { error } = await client.from("user_data").upsert({
+        user_id: sessionUserId,
+        subjects,
+        attempts,
+        updated_at: new Date().toISOString(),
+      });
+      setSyncStatus(error ? "error" : "saved");
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [subjects, attempts, sessionUserId, cloudReady]);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
     () => attempts.filter((a) => a.subjectId === selected),
@@ -174,6 +414,14 @@ export default function Home() {
         ? v.map((x) => (x.id === s.id ? s : x))
         : [...v, s],
     );
+  async function signOut() {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+    setSubjects([]);
+    setAttempts([]);
+    setSelected("");
+    setView("home");
+  }
   function deleteSubject() {
     if (!subject) return;
     if (
@@ -501,9 +749,16 @@ export default function Home() {
       alert("Excelファイルを読み込めませんでした");
     }
   }
-  if (!ready)
+  if (!ready || !authChecked)
     return (
       <main className="min-h-screen grid place-items-center">読み込み中…</main>
+    );
+  if (isSupabaseConfigured && !session) return <AuthScreen />;
+  if (isSupabaseConfigured && !cloudReady)
+    return (
+      <main className="min-h-screen grid place-items-center">
+        クラウドデータを読み込み中…
+      </main>
     );
   return (
     <main className="min-h-screen">
@@ -515,7 +770,34 @@ export default function Home() {
           >
             Study Studio
           </button>
-          <span className="text-sm text-blue-200">試験対策ワークスペース</span>
+          <div className="flex items-center gap-3 text-right">
+            <div>
+              <p className="text-xs text-blue-200">
+                {syncStatus === "saved"
+                  ? "クラウドに保存済み"
+                  : syncStatus === "saving"
+                    ? "保存中…"
+                    : syncStatus === "error"
+                      ? "同期エラー"
+                      : syncStatus === "loading"
+                        ? "同期中…"
+                        : "端末内に保存"}
+              </p>
+              {session?.user.email && (
+                <p className="hidden text-xs text-white/70 sm:block">
+                  {session.user.email}
+                </p>
+              )}
+            </div>
+            {session && (
+              <button
+                onClick={signOut}
+                className="rounded-lg border border-white/30 px-3 py-2 text-xs font-bold"
+              >
+                ログアウト
+              </button>
+            )}
+          </div>
         </div>
       </header>
       <div className="max-w-5xl mx-auto p-4 md:p-8">
