@@ -1,5 +1,5 @@
 "use client";
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 import Papa from "papaparse";
 import * as XLSX from "xlsx";
@@ -57,6 +57,8 @@ type SyncStatus = "loading" | "saved" | "saving" | "error" | "offline";
 const SUBJECTS = "study_subjects_v2",
   ATTEMPTS = "study_attempts_v2";
 const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
+const serializeStudyData = (subjects: Subject[], attempts: Attempt[]) =>
+  JSON.stringify({ subjects, attempts });
 const uid = () => crypto.randomUUID();
 const stableId = (value: string) => {
   let hash = 2166136261;
@@ -264,6 +266,7 @@ export default function Home() {
       isSupabaseConfigured ? "loading" : "offline",
     ),
     [syncRetry, setSyncRetry] = useState(0);
+  const lastSyncedData = useRef("");
   const sessionUserId = session?.user.id;
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -382,9 +385,17 @@ export default function Home() {
           setCloudReady(true);
           return;
         }
+        lastSyncedData.current = serializeStudyData(
+          cachedSubjects,
+          cachedAttempts,
+        );
         setSubjects(cachedSubjects);
         setAttempts(cachedAttempts);
       } else {
+        lastSyncedData.current = serializeStudyData(
+          remoteSubjects,
+          remoteAttempts,
+        );
         setSubjects(remoteSubjects);
         setAttempts(remoteAttempts);
       }
@@ -405,6 +416,8 @@ export default function Home() {
   }, [ready, sessionUserId, syncRetry]);
   useEffect(() => {
     if (!supabase || !sessionUserId || !cloudReady) return;
+    const serialized = serializeStudyData(subjects, attempts);
+    if (serialized === lastSyncedData.current) return;
     const client = supabase;
     const timer = window.setTimeout(async () => {
       setSyncStatus("saving");
@@ -414,7 +427,12 @@ export default function Home() {
         attempts,
         updated_at: new Date().toISOString(),
       });
-      setSyncStatus(error ? "error" : "saved");
+      if (error) {
+        setSyncStatus("error");
+      } else {
+        lastSyncedData.current = serialized;
+        setSyncStatus("saved");
+      }
     }, 700);
     return () => window.clearTimeout(timer);
   }, [subjects, attempts, sessionUserId, cloudReady]);
