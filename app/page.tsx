@@ -187,6 +187,16 @@ export default function Home() {
     setSelected("");
     setView("home");
   }
+  function deleteAttempt(attempt: Attempt) {
+    if (
+      !confirm(
+        `${attempt.date}の結果を削除しますか？\nこの操作は取り消せません。`,
+      )
+    )
+      return;
+    setAttempts((current) => current.filter((item) => item.id !== attempt.id));
+    setExpandedAttempt(null);
+  }
   async function addSubject() {
     const name = prompt("科目名を入力してください");
     if (!name) return;
@@ -781,6 +791,14 @@ export default function Home() {
                                 </label>
                               </div>
                             )}
+                            <div className="mt-4 border-t pt-4">
+                              <button
+                                onClick={() => deleteAttempt(a)}
+                                className="rounded-lg border border-red-300 px-4 py-2 font-bold text-red-600 hover:bg-red-50"
+                              >
+                                この結果を削除
+                              </button>
+                            </div>
                           </div>
                         )}
                       </div>
