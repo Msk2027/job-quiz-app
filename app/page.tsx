@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
-import { jsPDF } from "jspdf";
+import * as XLSX from "xlsx";
 
 type QType = "choice" | "ox" | "fill" | "essay";
 type Question = {
@@ -31,6 +31,15 @@ type AnswerRecord = {
   explanation?: string;
   modelAnswer?: string;
   rubric?: string;
+  grading?: EssayGrading;
+};
+type EssayGrading = {
+  score: number;
+  assessment: string;
+  goodPoints: string;
+  missingPoints: string;
+  improvedAnswer: string;
+  importedAt: string;
 };
 type Attempt = {
   id: string;
@@ -39,6 +48,7 @@ type Attempt = {
   score: number;
   total: number;
   answers: AnswerRecord[];
+  status?: "completed" | "interrupted";
 };
 type PendingImport = { name: string; url: string };
 const SUBJECTS = "study_subjects_v2",
@@ -126,6 +136,15 @@ export default function Home() {
   const [subjectSettings, setSubjectSettings] = useState<Subject | null>(null),
     [settingsLoading, setSettingsLoading] = useState(false);
   const [expandedAttempt, setExpandedAttempt] = useState<string | null>(null);
+  const [showStudySetup, setShowStudySetup] = useState(false),
+    [studyTypes, setStudyTypes] = useState<QType[]>([
+      "choice",
+      "ox",
+      "fill",
+      "essay",
+    ]),
+    [studyCount, setStudyCount] = useState(1),
+    [lastInterrupted, setLastInterrupted] = useState(false);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       try {
@@ -147,6 +166,8 @@ export default function Home() {
     () => attempts.filter((a) => a.subjectId === selected),
     [attempts, selected],
   );
+  const studyAvailable =
+    subject?.questions.filter((q) => studyTypes.includes(q.type)).length || 0;
   const saveSubject = (s: Subject) =>
     setSubjects((v) =>
       v.some((x) => x.id === s.id)
@@ -259,14 +280,44 @@ export default function Home() {
     });
     setEditing(null);
   }
-  function start() {
+  function openStudySetup() {
     if (!subject?.questions.length) return alert("問題を追加してください");
-    setActive([...subject.questions].sort(() => Math.random() - 0.5));
+    setStudyTypes(["choice", "ox", "fill", "essay"]);
+    setStudyCount(subject.questions.length);
+    setShowStudySetup(true);
+  }
+  function start() {
+    if (!subject) return;
+    const candidates = subject.questions.filter((q) =>
+      studyTypes.includes(q.type),
+    );
+    if (!candidates.length) return alert("問題形式を1つ以上選択してください");
+    const answerCounts = new Map<string, number>();
+    stats.forEach((attempt) =>
+      (attempt.answers || []).forEach((answer) =>
+        answerCounts.set(
+          answer.questionId,
+          (answerCounts.get(answer.questionId) || 0) + 1,
+        ),
+      ),
+    );
+    const prioritized = candidates
+      .map((question) => {
+        const count = answerCounts.get(question.id) || 0;
+        const weight = 1 + 3 / (count + 1);
+        return { question, key: Math.pow(Math.random(), 1 / weight) };
+      })
+      .sort((a, b) => b.key - a.key)
+      .slice(0, Math.min(studyCount, candidates.length))
+      .map((item) => item.question);
+    setActive(prioritized);
     setIndex(0);
     setAnswers([]);
     setDraft("");
     setFeedback(null);
     setSubmitted(false);
+    setLastInterrupted(false);
+    setShowStudySetup(false);
     setView("play");
   }
   function submit() {
@@ -291,6 +342,28 @@ export default function Home() {
       },
     ]);
   }
+  function saveAttempt(interrupted: boolean) {
+    const scored = answers;
+    if (!scored.length) {
+      if (interrupted) {
+        alert("まだ回答した問題がないため、結果は保存されません");
+        setView("subject");
+      }
+      return;
+    }
+    const attempt: Attempt = {
+      id: uid(),
+      subjectId: selected,
+      date: new Date().toLocaleString("ja-JP"),
+      score: scored.filter((x) => x.correct).length,
+      total: scored.filter((x) => x.correct !== null).length,
+      answers: scored,
+      status: interrupted ? "interrupted" : "completed",
+    };
+    setAttempts((v) => [attempt, ...v].slice(0, 100));
+    setLastInterrupted(interrupted);
+    setView("result");
+  }
   function next() {
     if (index + 1 < active.length) {
       setIndex((i) => i + 1);
@@ -298,56 +371,125 @@ export default function Home() {
       setFeedback(null);
       setSubmitted(false);
     } else {
-      const scored = answers;
-      const a: Attempt = {
-        id: uid(),
-        subjectId: selected,
-        date: new Date().toLocaleString("ja-JP"),
-        score: scored.filter((x) => x.correct).length,
-        total: scored.filter((x) => x.correct !== null).length,
-        answers: scored,
-      };
-      setAttempts((v) => [a, ...v].slice(0, 100));
-      setView("result");
+      saveAttempt(false);
     }
   }
-  async function exportPdf() {
+  function exportEssayText(attemptId?: string) {
     if (!subject) return;
+    const latest = attemptId
+      ? attempts.find((a) => a.id === attemptId)
+      : attempts.find((a) => a.subjectId === subject.id);
     const essay =
-      attempts
-        .find((a) => a.subjectId === subject.id)
-        ?.answers.filter(
-          (a) =>
-            a.type === "essay" ||
-            subject.questions.find((q) => q.id === a.questionId)?.type ===
-              "essay",
-        ) || [];
+      latest?.answers.filter(
+        (answer) =>
+          answer.type === "essay" ||
+          subject.questions.find((q) => q.id === answer.questionId)?.type ===
+            "essay",
+      ) || [];
     if (!essay.length) return alert("出力できる論述答案がありません");
-    const doc = new jsPDF();
-    doc.setFontSize(16);
-    doc.text(`${subject.name} - Essay Answers`, 14, 18);
-    let y = 30;
-    essay.forEach((a, i) => {
-      const current = subject.questions.find((x) => x.id === a.questionId);
-      const lines = [
-        `Q${i + 1}. ${a.question || current?.question || "Question"}`,
-        `Answer: ${a.answer}`,
-        `Model answer: ${a.modelAnswer || current?.modelAnswer || "-"}`,
-        `Rubric: ${a.rubric || current?.rubric || "-"}`,
-      ];
-      lines.forEach((line) => {
-        doc.splitTextToSize(line, 180).forEach((l: string) => {
-          if (y > 280) {
-            doc.addPage();
-            y = 18;
-          }
-          doc.text(l, 14, y);
-          y += 7;
-        });
-      });
-      y += 5;
+    const instruction = [
+      "【AIへの指示】",
+      "あなたは大学の試験答案を採点する教員です。",
+      "以下の各設問について、受験者の回答を模範解答と採点ポイントに照らして評価してください。",
+      "採点後はExcel（.xlsx）ファイルを1つ作成してください。",
+      "1行目の列名は必ず attemptId, questionId, score, assessment, goodPoints, missingPoints, improvedAnswer としてください。",
+      "attemptIdとquestionIdは各設問に記載された値を一字も変更せず使用してください。",
+      "scoreは0から100の数値、その他の列は日本語の文章で入力してください。",
+      "設問ごとに1行とし、列の追加・削除やセル結合はしないでください。",
+      "資料にない事実を推測で補わず、採点ポイントを重視してください。",
+    ].join("\n");
+    const body = essay
+      .map((answer, i) => {
+        const current = subject.questions.find(
+          (q) => q.id === answer.questionId,
+        );
+        return [
+          `【設問${i + 1}】`,
+          `attemptId: ${latest?.id || ""}`,
+          `questionId: ${answer.questionId}`,
+          answer.question || current?.question || "問題文なし",
+          "",
+          "【受験者の回答】",
+          answer.answer || "（未回答）",
+          "",
+          "【模範解答】",
+          answer.modelAnswer || current?.modelAnswer || "未設定",
+          "",
+          "【採点ポイント】",
+          answer.rubric || current?.rubric || "未設定",
+        ].join("\n");
+      })
+      .join("\n\n----------------------------------------\n\n");
+    const text = [
+      `科目：${subject.name}`,
+      `実施日時：${latest?.date || new Date().toLocaleString("ja-JP")}`,
+      "",
+      instruction,
+      "",
+      "========================================",
+      "",
+      body,
+    ].join("\n");
+    const blob = new Blob(["\uFEFF", text], {
+      type: "text/plain;charset=utf-8",
     });
-    doc.save(`${subject.name}-essay-answers.pdf`);
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${subject.name}-論述答案.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+  async function importEssayGrades(file: File, attemptId: string) {
+    try {
+      const data = await file.arrayBuffer();
+      const workbook = XLSX.read(data, { type: "array" });
+      const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(
+        firstSheet,
+        {
+          defval: "",
+        },
+      );
+      const grades = new Map<string, EssayGrading>();
+      for (const row of rows) {
+        const rowAttemptId = String(row.attemptId || "").trim();
+        const questionId = String(row.questionId || "").trim();
+        const score = Number(row.score);
+        if (rowAttemptId !== attemptId || !questionId) continue;
+        if (!Number.isFinite(score) || score < 0 || score > 100) continue;
+        grades.set(questionId, {
+          score,
+          assessment: String(row.assessment || ""),
+          goodPoints: String(row.goodPoints || ""),
+          missingPoints: String(row.missingPoints || ""),
+          improvedAnswer: String(row.improvedAnswer || ""),
+          importedAt: new Date().toLocaleString("ja-JP"),
+        });
+      }
+      if (!grades.size) {
+        return alert(
+          "取り込める採点結果がありません。実施回ID・問題ID・列名を確認してください。",
+        );
+      }
+      setAttempts((current) =>
+        current.map((attempt) =>
+          attempt.id === attemptId
+            ? {
+                ...attempt,
+                answers: attempt.answers.map((answer) =>
+                  grades.has(answer.questionId)
+                    ? { ...answer, grading: grades.get(answer.questionId) }
+                    : answer,
+                ),
+              }
+            : attempt,
+        ),
+      );
+      alert(`${grades.size}問分のAI採点結果を取り込みました`);
+    } catch {
+      alert("Excelファイルを読み込めませんでした");
+    }
   }
   if (!ready)
     return (
@@ -457,7 +599,7 @@ export default function Home() {
                     問題管理
                   </button>
                   <button
-                    onClick={start}
+                    onClick={openStudySetup}
                     className="bg-blue-600 text-white px-6 py-3 rounded-xl font-bold"
                   >
                     学習開始
@@ -495,11 +637,14 @@ export default function Home() {
                             <b>{a.date}</b>
                             <span className="block text-xs text-gray-500 mt-1">
                               {a.answers?.length || 0}問の回答記録
+                              {a.status === "interrupted" && "・途中中断"}
                             </span>
                           </span>
                           <span className="text-right">
                             <b className="text-blue-700 text-lg">
-                              {a.score}/{a.total}
+                              {a.total > 0
+                                ? `${a.score}/${a.total}`
+                                : "論述のみ"}
                             </b>
                             <span className="block text-xs text-gray-500">
                               {expandedAttempt === a.id ? "閉じる ▲" : "詳細 ▼"}
@@ -547,7 +692,9 @@ export default function Home() {
                                         ? "正解"
                                         : record.correct === false
                                           ? "不正解"
-                                          : "自己採点"}
+                                          : record.grading
+                                            ? `${record.grading.score}点`
+                                            : "未採点"}
                                     </span>
                                   </div>
                                   {contentChanged && (
@@ -575,33 +722,75 @@ export default function Home() {
                                   )}
                                   {qType === "essay" && (
                                     <div className="mt-2 text-sm bg-blue-50 p-3 rounded-lg">
-                                      <p>
-                                        <b>模範解答：</b>
-                                        {record.modelAnswer ||
-                                          current?.modelAnswer ||
-                                          "未設定"}
-                                      </p>
-                                      <p className="mt-1">
-                                        <b>採点ポイント：</b>
-                                        {record.rubric ||
-                                          current?.rubric ||
-                                          "未設定"}
-                                      </p>
+                                      {record.grading ? (
+                                        <div className="space-y-2">
+                                          <p className="text-lg font-black text-blue-700">
+                                            AI採点：{record.grading.score}点
+                                          </p>
+                                          <p>
+                                            <b>総合評価：</b>
+                                            {record.grading.assessment}
+                                          </p>
+                                          <p>
+                                            <b>良かった点：</b>
+                                            {record.grading.goodPoints}
+                                          </p>
+                                          <p>
+                                            <b>不足している点：</b>
+                                            {record.grading.missingPoints}
+                                          </p>
+                                          <p>
+                                            <b>改善した答案例：</b>
+                                            {record.grading.improvedAnswer}
+                                          </p>
+                                          <p className="text-xs text-gray-500">
+                                            取込日時：
+                                            {record.grading.importedAt}
+                                          </p>
+                                        </div>
+                                      ) : (
+                                        "サイト内では採点しません。テキスト出力後、AIに採点させ、結果のExcelを取り込んでください。"
+                                      )}
                                     </div>
                                   )}
                                 </div>
                               );
                             })}
+                            {a.answers.some(
+                              (answer) => answer.type === "essay",
+                            ) && (
+                              <div className="flex flex-wrap gap-3 pt-2">
+                                <button
+                                  onClick={() => exportEssayText(a.id)}
+                                  className="border border-blue-600 text-blue-700 px-4 py-2 rounded-lg font-bold"
+                                >
+                                  AI採点用テキストを出力
+                                </button>
+                                <label className="bg-blue-600 text-white px-4 py-2 rounded-lg font-bold cursor-pointer">
+                                  AI採点結果のExcelを取込
+                                  <input
+                                    type="file"
+                                    accept=".xlsx"
+                                    className="hidden"
+                                    onChange={(event) => {
+                                      const file = event.target.files?.[0];
+                                      if (file) importEssayGrades(file, a.id);
+                                      event.target.value = "";
+                                    }}
+                                  />
+                                </label>
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
                     ))}
                   </div>
                   <button
-                    onClick={exportPdf}
+                    onClick={() => exportEssayText()}
                     className="mt-5 border border-blue-600 text-blue-600 px-5 py-2 rounded-lg font-bold"
                   >
-                    最新の論述答案をPDF出力
+                    最新の論述答案をテキスト出力
                   </button>
                 </div>
               )}
@@ -899,13 +1088,122 @@ export default function Home() {
             </div>
           </div>
         )}
+        {showStudySetup && subject && (
+          <div className="fixed inset-0 bg-black/40 p-4 grid place-items-center z-20">
+            <div className="card p-6 w-full max-w-xl">
+              <h2 className="text-2xl font-black">学習設定</h2>
+              <p className="text-gray-500 mt-1 mb-6">
+                出題する問題形式と問題数を選んでください
+              </p>
+              <p className="font-bold mb-3">問題形式</p>
+              <div className="grid grid-cols-2 gap-3">
+                {(["choice", "ox", "fill", "essay"] as QType[]).map((type) => {
+                  const selectedType = studyTypes.includes(type);
+                  const typeCount = subject.questions.filter(
+                    (q) => q.type === type,
+                  ).length;
+                  return (
+                    <button
+                      key={type}
+                      disabled={!typeCount}
+                      onClick={() => {
+                        const nextTypes = selectedType
+                          ? studyTypes.filter((t) => t !== type)
+                          : [...studyTypes, type];
+                        setStudyTypes(nextTypes);
+                        const nextMax = subject.questions.filter((q) =>
+                          nextTypes.includes(q.type),
+                        ).length;
+                        setStudyCount((count) =>
+                          Math.max(1, Math.min(count, nextMax || 1)),
+                        );
+                      }}
+                      className={
+                        "border-2 p-4 rounded-xl text-left disabled:opacity-40 " +
+                        (selectedType
+                          ? "border-blue-600 bg-blue-50 text-blue-700"
+                          : "border-gray-200")
+                      }
+                    >
+                      <b>{typeName[type]}</b>
+                      <span className="block text-sm mt-1">{typeCount}問</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="mt-6">
+                <div className="flex justify-between items-center mb-3">
+                  <p className="font-bold">出題数</p>
+                  <p className="font-black text-blue-700">
+                    {Math.min(studyCount, studyAvailable || 1)}問
+                    <span className="text-sm text-gray-400 font-normal">
+                      {" "}
+                      / 最大{studyAvailable}問
+                    </span>
+                  </p>
+                </div>
+                <input
+                  type="range"
+                  min="1"
+                  max={Math.max(1, studyAvailable)}
+                  value={Math.min(studyCount, Math.max(1, studyAvailable))}
+                  onChange={(e) => setStudyCount(Number(e.target.value))}
+                  disabled={!studyAvailable}
+                  className="w-full accent-blue-600"
+                />
+                <input
+                  type="number"
+                  min="1"
+                  max={Math.max(1, studyAvailable)}
+                  value={Math.min(studyCount, Math.max(1, studyAvailable))}
+                  onChange={(e) =>
+                    setStudyCount(
+                      Math.max(
+                        1,
+                        Math.min(Number(e.target.value), studyAvailable || 1),
+                      ),
+                    )
+                  }
+                  disabled={!studyAvailable}
+                  className="mt-3 w-28 border p-2 rounded-lg text-center font-bold"
+                />
+              </div>
+              <div className="bg-amber-50 text-amber-800 text-sm p-3 rounded-xl mt-5">
+                未回答・回答回数の少ない問題を優先しつつ、回答済みの問題もランダムに出題します。
+              </div>
+              <div className="flex justify-end gap-3 mt-6">
+                <button onClick={() => setShowStudySetup(false)}>
+                  キャンセル
+                </button>
+                <button
+                  onClick={start}
+                  disabled={!studyAvailable}
+                  className="bg-blue-600 disabled:bg-gray-300 text-white px-6 py-3 rounded-xl font-bold"
+                >
+                  この設定で開始
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {view === "play" && active[index] && (
           <div className="card p-6 md:p-10 max-w-3xl mx-auto">
             <div className="flex justify-between text-sm text-gray-500 mb-6">
               <span>{typeName[active[index].type]}</span>
-              <span>
-                {index + 1}/{active.length}
-              </span>
+              <div className="flex items-center gap-3">
+                <span>
+                  {index + 1}/{active.length}
+                </span>
+                <button
+                  onClick={() =>
+                    confirm("ここまでの解答を保存して中断しますか？") &&
+                    saveAttempt(true)
+                  }
+                  className="text-red-600 border border-red-200 px-3 py-1 rounded-full font-bold"
+                >
+                  中断して保存
+                </button>
+              </div>
             </div>
             <h1 className="text-xl md:text-2xl font-black leading-relaxed mb-7">
               {active[index].question}
@@ -946,7 +1244,7 @@ export default function Home() {
                 className="w-full border-2 p-4 rounded-xl"
               />
             )}
-            {submitted && (
+            {submitted && active[index].type !== "essay" && (
               <div className="bg-gray-50 p-4 rounded-xl mt-5">
                 {feedback !== null && (
                   <b className={feedback ? "text-green-600" : "text-red-600"}>
@@ -954,18 +1252,6 @@ export default function Home() {
                   </b>
                 )}
                 <p className="mt-2">{active[index].explanation}</p>
-                {active[index].type === "essay" && (
-                  <>
-                    <p className="mt-3">
-                      <b>模範解答：</b>
-                      {active[index].modelAnswer}
-                    </p>
-                    <p>
-                      <b>採点ポイント：</b>
-                      {active[index].rubric}
-                    </p>
-                  </>
-                )}
               </div>
             )}
             <div className="flex justify-end mt-6">
@@ -990,16 +1276,18 @@ export default function Home() {
         )}
         {view === "result" && subject && (
           <div className="card max-w-xl mx-auto text-center p-10">
-            <h1 className="text-3xl font-black">学習完了</h1>
+            <h1 className="text-3xl font-black">
+              {lastInterrupted ? "途中結果を保存しました" : "学習完了"}
+            </h1>
             <p className="text-gray-500 mt-2">
-              論述問題はPDFにまとめてAIで採点できます
+              論述問題はテキストにまとめてAIで採点できます
             </p>
             <div className="flex flex-col gap-3 mt-8">
               <button
-                onClick={exportPdf}
+                onClick={() => exportEssayText()}
                 className="bg-blue-600 text-white py-3 rounded-xl font-bold"
               >
-                論述答案をPDF出力
+                論述答案をテキスト出力
               </button>
               <button
                 onClick={() => setView("subject")}
