@@ -2,6 +2,9 @@ import type { QType, Question } from "@/lib/study-types";
 
 const uid = () => crypto.randomUUID();
 
+export const MIN_CHOICE_OPTIONS = 2;
+export const MAX_CHOICE_OPTIONS = 10;
+
 const stableId = (value: string) => {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i++) {
@@ -23,7 +26,7 @@ export const blankQuestion = (): Question => ({
 });
 
 export const typeName: Record<QType, string> = {
-  choice: "4択",
+  choice: "選択式",
   ox: "○×",
   fill: "穴埋め",
   essay: "論述",
@@ -41,13 +44,15 @@ function rowToQuestion(row: Record<string, string>): Question | null {
         : rawType === "essay" || rawType === "論述"
           ? "essay"
           : "choice";
+  const options = Array.from({ length: MAX_CHOICE_OPTIONS }, (_, index) => {
+    const number = index + 1;
+    return (row[`option${number}`] || row[`選択肢${number}`] || "").trim();
+  }).filter(Boolean);
   return {
     id: (row.id || row.ID || "").trim() || stableId(`${type}:${question}`),
     type,
     question,
-    options: [row.option1, row.option2, row.option3, row.option4].filter(
-      Boolean,
-    ),
+    options,
     answer: row.answer || row.正解 || "",
     explanation: row.explanation || row.解説 || "",
     modelAnswer: row.modelAnswer || row.模範解答 || "",
