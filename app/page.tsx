@@ -830,7 +830,7 @@ export default function Home() {
                           ? ["", "", "", ""]
                           : editing.options,
                     });
-                  }
+                  }}
                   className="block w-full border p-3 rounded-lg mt-1 mb-4"
                 >
                   {Object.entries(typeName).map(([v, n]) => (
