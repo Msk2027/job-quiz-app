@@ -58,7 +58,7 @@ export default function Home() {
       "fill",
       "essay",
     ]),
-    [studyCount, setStudyCount] = useState(1),
+    [studyCount, setStudyCount] = useState("1"),
     [lastInterrupted, setLastInterrupted] = useState(false);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
@@ -68,11 +68,14 @@ export default function Home() {
   const studyAvailable =
     subject?.questions.filter((q) => studyTypes.includes(q.type)).length || 0;
   const saveSubject = (s: Subject) =>
-    setSubjects((v) =>
-      v.some((x) => x.id === s.id)
-        ? v.map((x) => (x.id === s.id ? s : x))
-        : [...v, s],
-    );
+    setSubjects((current) => {
+      const unique = Array.from(
+        new Map(current.map((item) => [item.id, item])).values(),
+      );
+      return unique.some((item) => item.id === s.id)
+        ? unique.map((item) => (item.id === s.id ? s : item))
+        : [...unique, s];
+    });
   async function signOut() {
     await signOutCloud();
     setSelected("");
@@ -211,7 +214,7 @@ export default function Home() {
   function openStudySetup() {
     if (!subject?.questions.length) return alert("問題を追加してください");
     setStudyTypes(["choice", "ox", "fill", "essay"]);
-    setStudyCount(subject.questions.length);
+    setStudyCount(String(subject.questions.length));
     setShowStudySetup(true);
   }
   function start() {
@@ -220,6 +223,9 @@ export default function Home() {
       studyTypes.includes(q.type),
     );
     if (!candidates.length) return alert("問題形式を1つ以上選択してください");
+    const requestedCount = Number(studyCount);
+    if (!Number.isInteger(requestedCount) || requestedCount < 1)
+      return alert("1以上の数字を入力してください");
     const answerCounts = new Map<string, number>();
     stats.forEach((attempt) =>
       (attempt.answers || []).forEach((answer) =>
@@ -236,7 +242,7 @@ export default function Home() {
         return { question, key: Math.pow(Math.random(), 1 / weight) };
       })
       .sort((a, b) => b.key - a.key)
-      .slice(0, Math.min(studyCount, candidates.length))
+      .slice(0, Math.min(requestedCount, candidates.length))
       .map((item) => item.question);
     setActive(prioritized);
     setIndex(0);
@@ -1140,7 +1146,14 @@ export default function Home() {
                           nextTypes.includes(q.type),
                         ).length;
                         setStudyCount((count) =>
-                          Math.max(1, Math.min(count, nextMax || 1)),
+                          count === ""
+                            ? ""
+                            : String(
+                                Math.max(
+                                  1,
+                                  Math.min(Number(count), nextMax || 1),
+                                ),
+                              ),
                         );
                       }}
                       className={
@@ -1160,7 +1173,12 @@ export default function Home() {
                 <div className="flex justify-between items-center mb-3">
                   <p className="font-bold">出題数</p>
                   <p className="font-black text-blue-700">
-                    {Math.min(studyCount, studyAvailable || 1)}問
+                    {studyCount === ""
+                      ? "未入力"
+                      : `${Math.min(
+                          Number(studyCount),
+                          studyAvailable || 1,
+                        )}問`}
                     <span className="text-sm text-gray-400 font-normal">
                       {" "}
                       / 最大{studyAvailable}問
@@ -1171,8 +1189,15 @@ export default function Home() {
                   type="range"
                   min="1"
                   max={Math.max(1, studyAvailable)}
-                  value={Math.min(studyCount, Math.max(1, studyAvailable))}
-                  onChange={(e) => setStudyCount(Number(e.target.value))}
+                  value={
+                    studyCount === ""
+                      ? 1
+                      : Math.min(
+                          Number(studyCount),
+                          Math.max(1, studyAvailable),
+                        )
+                  }
+                  onChange={(e) => setStudyCount(e.target.value)}
                   disabled={!studyAvailable}
                   className="w-full accent-blue-600"
                 />
@@ -1180,15 +1205,8 @@ export default function Home() {
                   type="number"
                   min="1"
                   max={Math.max(1, studyAvailable)}
-                  value={Math.min(studyCount, Math.max(1, studyAvailable))}
-                  onChange={(e) =>
-                    setStudyCount(
-                      Math.max(
-                        1,
-                        Math.min(Number(e.target.value), studyAvailable || 1),
-                      ),
-                    )
-                  }
+                  value={studyCount}
+                  onChange={(e) => setStudyCount(e.target.value)}
                   disabled={!studyAvailable}
                   className="mt-3 w-28 border p-2 rounded-lg text-center font-bold"
                 />

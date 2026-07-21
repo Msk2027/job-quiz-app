@@ -1,21 +1,50 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import type { Session } from "@supabase/supabase-js";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import type { Attempt, Subject, SyncStatus } from "@/lib/study-types";
 
 const SUBJECTS_KEY = "study_subjects_v2";
 const ATTEMPTS_KEY = "study_attempts_v2";
+const CACHE_UPDATED_KEY = "study_cache_updated_v2";
 const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
 const serialize = (subjects: Subject[], attempts: Attempt[]) =>
   JSON.stringify({ subjects, attempts });
+const dedupeSubjects = (subjects: Subject[]) =>
+  Array.from(new Map(subjects.map((subject) => [subject.id, subject])).values());
 const readJson = <T>(key: string, fallback: T): T => {
   try {
     return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback));
   } catch {
     return fallback;
   }
+};
+const writeUserCache = (
+  userId: string,
+  subjects: Subject[],
+  attempts: Attempt[],
+  updatedAt = Date.now(),
+) => {
+  localStorage.setItem(
+    userCacheKey(SUBJECTS_KEY, userId),
+    JSON.stringify(subjects),
+  );
+  localStorage.setItem(
+    userCacheKey(ATTEMPTS_KEY, userId),
+    JSON.stringify(attempts),
+  );
+  localStorage.setItem(
+    userCacheKey(CACHE_UPDATED_KEY, userId),
+    String(updatedAt),
+  );
 };
 
 export function useStudySync() {
@@ -30,7 +59,42 @@ export function useStudySync() {
   );
   const [syncRetry, setSyncRetry] = useState(0);
   const lastSyncedData = useRef("");
+  const lastRemoteUpdatedAt = useRef(0);
+  const subjectsRef = useRef<Subject[]>([]);
+  const attemptsRef = useRef<Attempt[]>([]);
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
+  const cacheLoadedForUser = useRef<string | null>(null);
   const sessionUserId = session?.user.id;
+
+  useEffect(() => {
+    subjectsRef.current = subjects;
+    attemptsRef.current = attempts;
+  }, [subjects, attempts]);
+
+  const updateSubjects: Dispatch<SetStateAction<Subject[]>> = useCallback(
+    (value) =>
+      setSubjects((current) => {
+        const next = dedupeSubjects(
+          typeof value === "function" ? value(current) : value,
+        );
+        subjectsRef.current = next;
+        if (sessionUserId)
+          writeUserCache(sessionUserId, next, attemptsRef.current);
+        return next;
+      }),
+    [sessionUserId],
+  );
+  const updateAttempts: Dispatch<SetStateAction<Attempt[]>> = useCallback(
+    (value) =>
+      setAttempts((current) => {
+        const next = typeof value === "function" ? value(current) : value;
+        attemptsRef.current = next;
+        if (sessionUserId)
+          writeUserCache(sessionUserId, subjectsRef.current, next);
+        return next;
+      }),
+    [sessionUserId],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -44,26 +108,18 @@ export function useStudySync() {
   useEffect(() => {
     if (!ready) return;
     if (sessionUserId) {
-      localStorage.setItem(
-        userCacheKey(SUBJECTS_KEY, sessionUserId),
-        JSON.stringify(subjects),
-      );
+      if (!cloudReady) return;
+      const serialized = serialize(subjects, attempts);
+      const cacheUpdatedAt =
+        serialized === lastSyncedData.current && lastRemoteUpdatedAt.current
+          ? lastRemoteUpdatedAt.current
+          : Date.now();
+      writeUserCache(sessionUserId, subjects, attempts, cacheUpdatedAt);
     } else if (!isSupabaseConfigured) {
       localStorage.setItem(SUBJECTS_KEY, JSON.stringify(subjects));
-    }
-  }, [subjects, ready, sessionUserId]);
-
-  useEffect(() => {
-    if (!ready) return;
-    if (sessionUserId) {
-      localStorage.setItem(
-        userCacheKey(ATTEMPTS_KEY, sessionUserId),
-        JSON.stringify(attempts),
-      );
-    } else if (!isSupabaseConfigured) {
       localStorage.setItem(ATTEMPTS_KEY, JSON.stringify(attempts));
     }
-  }, [attempts, ready, sessionUserId]);
+  }, [subjects, attempts, ready, sessionUserId, cloudReady]);
 
   useEffect(() => {
     if (!ready || !supabase) return;
@@ -84,6 +140,9 @@ export function useStudySync() {
         setCloudReady(false);
         setSyncStatus("loading");
       } else if (!nextSession) {
+        cacheLoadedForUser.current = null;
+        lastSyncedData.current = "";
+        lastRemoteUpdatedAt.current = 0;
         setCloudReady(false);
         setSyncStatus("offline");
       }
@@ -100,34 +159,49 @@ export function useStudySync() {
     const userId = sessionUserId;
 
     async function loadCloudData() {
-      const userSubjects = readJson<Subject[]>(
-        userCacheKey(SUBJECTS_KEY, userId),
-        [],
-      );
-      const legacySubjects = readJson<Subject[]>(SUBJECTS_KEY, []);
-      const cachedSubjects = userSubjects.length
-        ? userSubjects
-        : legacySubjects;
-      const userAttempts = readJson<Attempt[]>(
-        userCacheKey(ATTEMPTS_KEY, userId),
-        [],
-      );
-      const legacyAttempts = readJson<Attempt[]>(ATTEMPTS_KEY, []);
-      const cachedAttempts = userAttempts.length
-        ? userAttempts
-        : legacyAttempts;
-
-      await Promise.resolve();
-      if (cachedSubjects.length || cachedAttempts.length) {
+      const firstLoadForUser = cacheLoadedForUser.current !== userId;
+      let cachedSubjects: Subject[];
+      let cachedAttempts: Attempt[];
+      if (firstLoadForUser) {
+        const userSubjectsKey = userCacheKey(SUBJECTS_KEY, userId);
+        const userAttemptsKey = userCacheKey(ATTEMPTS_KEY, userId);
+        const hasUserSubjectsCache =
+          localStorage.getItem(userSubjectsKey) !== null;
+        const hasUserAttemptsCache =
+          localStorage.getItem(userAttemptsKey) !== null;
+        const userSubjects = readJson<Subject[]>(
+          userSubjectsKey,
+          [],
+        );
+        const legacySubjects = readJson<Subject[]>(SUBJECTS_KEY, []);
+        cachedSubjects = dedupeSubjects(
+          hasUserSubjectsCache ? userSubjects : legacySubjects,
+        );
+        const userAttempts = readJson<Attempt[]>(
+          userAttemptsKey,
+          [],
+        );
+        const legacyAttempts = readJson<Attempt[]>(ATTEMPTS_KEY, []);
+        cachedAttempts = hasUserAttemptsCache ? userAttempts : legacyAttempts;
+        cacheLoadedForUser.current = userId;
+        subjectsRef.current = cachedSubjects;
+        attemptsRef.current = cachedAttempts;
         setSubjects(cachedSubjects);
         setAttempts(cachedAttempts);
+      } else {
+        cachedSubjects = dedupeSubjects(subjectsRef.current);
+        cachedAttempts = attemptsRef.current;
       }
+      const cachedUpdatedAt = Number(
+        localStorage.getItem(userCacheKey(CACHE_UPDATED_KEY, userId)) || 0,
+      );
+      const cachedSerialized = serialize(cachedSubjects, cachedAttempts);
 
       const controller = new AbortController();
       const timeout = window.setTimeout(() => controller.abort(), 8000);
       const { data, error } = await supabase!
         .from("user_data")
-        .select("subjects, attempts")
+        .select("subjects, attempts, updated_at")
         .eq("user_id", userId)
         .abortSignal(controller.signal)
         .maybeSingle();
@@ -139,22 +213,45 @@ export function useStudySync() {
         return;
       }
 
-      const remoteSubjects: Subject[] =
-        data && Array.isArray(data.subjects) ? data.subjects : [];
+      const remoteSubjects = dedupeSubjects(
+        data && Array.isArray(data.subjects) ? data.subjects : [],
+      );
       const remoteAttempts: Attempt[] =
         data && Array.isArray(data.attempts) ? data.attempts : [];
-      const shouldMigrate =
-        cachedSubjects.length + cachedAttempts.length > 0 &&
+      const remoteSerialized = serialize(remoteSubjects, remoteAttempts);
+      const remoteUpdatedAt = data?.updated_at
+        ? Date.parse(String(data.updated_at))
+        : 0;
+      const latestSubjects = dedupeSubjects(subjectsRef.current);
+      const latestAttempts = attemptsRef.current;
+      const latestSerialized = serialize(latestSubjects, latestAttempts);
+      const changedDuringLoad = latestSerialized !== cachedSerialized;
+      const remoteIsEmpty =
         remoteSubjects.length + remoteAttempts.length === 0;
+      const cachedHasData =
+        cachedSubjects.length + cachedAttempts.length > 0;
+      const cacheDiffersFromRemote = cachedSerialized !== remoteSerialized;
+      const cacheIsNewer =
+        cacheDiffersFromRemote &&
+        ((cachedUpdatedAt > 0 && cachedUpdatedAt > remoteUpdatedAt) ||
+          (cachedUpdatedAt === 0 && cachedHasData && remoteIsEmpty));
+      const shouldUseLocal = !data || changedDuringLoad || cacheIsNewer;
 
-      if (!data || shouldMigrate) {
+      if (shouldUseLocal) {
+        const nextSubjects = changedDuringLoad
+          ? latestSubjects
+          : cachedSubjects;
+        const nextAttempts = changedDuringLoad
+          ? latestAttempts
+          : cachedAttempts;
+        const updatedAt = new Date().toISOString();
         const { error: migrationError } = await supabase!
           .from("user_data")
           .upsert({
             user_id: userId,
-            subjects: cachedSubjects,
-            attempts: cachedAttempts,
-            updated_at: new Date().toISOString(),
+            subjects: nextSubjects,
+            attempts: nextAttempts,
+            updated_at: updatedAt,
           });
         if (!active) return;
         if (migrationError) {
@@ -162,11 +259,17 @@ export function useStudySync() {
           setCloudReady(false);
           return;
         }
-        lastSyncedData.current = serialize(cachedSubjects, cachedAttempts);
-        setSubjects(cachedSubjects);
-        setAttempts(cachedAttempts);
+        lastSyncedData.current = serialize(nextSubjects, nextAttempts);
+        lastRemoteUpdatedAt.current = Date.parse(updatedAt);
+        subjectsRef.current = nextSubjects;
+        attemptsRef.current = nextAttempts;
+        setSubjects(nextSubjects);
+        setAttempts(nextAttempts);
       } else {
-        lastSyncedData.current = serialize(remoteSubjects, remoteAttempts);
+        lastSyncedData.current = remoteSerialized;
+        lastRemoteUpdatedAt.current = remoteUpdatedAt;
+        subjectsRef.current = remoteSubjects;
+        attemptsRef.current = remoteAttempts;
         setSubjects(remoteSubjects);
         setAttempts(remoteAttempts);
       }
@@ -193,20 +296,27 @@ export function useStudySync() {
     const serialized = serialize(subjects, attempts);
     if (serialized === lastSyncedData.current) return;
     const client = supabase;
-    const timer = window.setTimeout(async () => {
+    const timer = window.setTimeout(() => {
       setSyncStatus("saving");
-      const { error } = await client.from("user_data").upsert({
-        user_id: sessionUserId,
-        subjects,
-        attempts,
-        updated_at: new Date().toISOString(),
-      });
-      if (error) {
-        setSyncStatus("error");
-      } else {
+      saveQueue.current = saveQueue.current.then(async () => {
+        const updatedAt = new Date().toISOString();
+        const { error } = await client.from("user_data").upsert({
+          user_id: sessionUserId,
+          subjects,
+          attempts,
+          updated_at: updatedAt,
+        });
+        if (error) {
+          setSyncStatus("error");
+          return;
+        }
         lastSyncedData.current = serialized;
-        setSyncStatus("saved");
-      }
+        lastRemoteUpdatedAt.current = Date.parse(updatedAt);
+        if (
+          serialize(subjectsRef.current, attemptsRef.current) === serialized
+        )
+          setSyncStatus("saved");
+      });
     }, 700);
     return () => window.clearTimeout(timer);
   }, [subjects, attempts, sessionUserId, cloudReady]);
@@ -214,6 +324,11 @@ export function useStudySync() {
   async function signOut() {
     if (!supabase) return;
     await supabase.auth.signOut();
+    cacheLoadedForUser.current = null;
+    subjectsRef.current = [];
+    attemptsRef.current = [];
+    lastSyncedData.current = "";
+    lastRemoteUpdatedAt.current = 0;
     setSubjects([]);
     setAttempts([]);
   }
@@ -226,9 +341,9 @@ export function useStudySync() {
   return {
     ready,
     subjects,
-    setSubjects,
+    setSubjects: updateSubjects,
     attempts,
-    setAttempts,
+    setAttempts: updateAttempts,
     session,
     authChecked,
     syncStatus,
