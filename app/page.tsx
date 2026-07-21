@@ -2,7 +2,13 @@
 import { useMemo, useState } from "react";
 import { AuthScreen } from "@/components/auth-screen";
 import { useStudySync } from "@/hooks/use-study-sync";
-import { blankQuestion, loadSheet, typeName } from "@/lib/questions";
+import {
+  blankQuestion,
+  loadSheet,
+  MAX_CHOICE_OPTIONS,
+  MIN_CHOICE_OPTIONS,
+  typeName,
+} from "@/lib/questions";
 import { isSupabaseConfigured } from "@/lib/supabase";
 import type {
   Attempt,
@@ -180,11 +186,25 @@ export default function Home() {
   function saveQuestion() {
     if (!subject || !editing?.question.trim())
       return alert("問題文を入力してください");
+    let nextQuestion = editing;
+    if (editing.type === "choice") {
+      const options = editing.options.map((option) => option.trim()).filter(Boolean);
+      if (options.length < MIN_CHOICE_OPTIONS)
+        return alert(`選択肢を${MIN_CHOICE_OPTIONS}個以上入力してください`);
+      if (new Set(options).size !== options.length)
+        return alert("同じ選択肢が重複しています");
+      const answer = editing.answer.trim();
+      if (!options.includes(answer))
+        return alert("正解には、入力した選択肢と同じ文章を設定してください");
+      nextQuestion = { ...editing, options, answer };
+    }
     saveSubject({
       ...subject,
-      questions: subject.questions.some((q) => q.id === editing.id)
-        ? subject.questions.map((q) => (q.id === editing.id ? editing : q))
-        : [...subject.questions, editing],
+      questions: subject.questions.some((q) => q.id === nextQuestion.id)
+        ? subject.questions.map((q) =>
+            q.id === nextQuestion.id ? nextQuestion : q,
+          )
+        : [...subject.questions, nextQuestion],
     });
     setEditing(null);
   }
@@ -799,8 +819,17 @@ export default function Home() {
                 形式
                 <select
                   value={editing.type}
-                  onChange={(e) =>
-                    setEditing({ ...editing, type: e.target.value as QType })
+                  onChange={(e) => {
+                    const type = e.target.value as QType;
+                    setEditing({
+                      ...editing,
+                      type,
+                      options:
+                        type === "choice" &&
+                        editing.options.length < MIN_CHOICE_OPTIONS
+                          ? ["", "", "", ""]
+                          : editing.options,
+                    });
                   }
                   className="block w-full border p-3 rounded-lg mt-1 mb-4"
                 >
@@ -822,20 +851,64 @@ export default function Home() {
                   rows={3}
                 />
               </label>
-              {editing.type === "choice" &&
-                editing.options.map((o, i) => (
-                  <input
-                    key={i}
-                    placeholder={`選択肢${i + 1}`}
-                    value={o}
-                    onChange={(e) => {
-                      const x = [...editing.options];
-                      x[i] = e.target.value;
-                      setEditing({ ...editing, options: x });
-                    }}
-                    className="block w-full border p-3 rounded-lg mb-2"
-                  />
-                ))}
+              {editing.type === "choice" && (
+                <div className="mb-4">
+                  <p className="mb-2 text-sm font-bold">
+                    選択肢（{MIN_CHOICE_OPTIONS}〜{MAX_CHOICE_OPTIONS}個）
+                  </p>
+                  {editing.options.map((option, index) => (
+                    <div key={index} className="mb-2 flex gap-2">
+                      <input
+                        placeholder={`選択肢${index + 1}`}
+                        value={option}
+                        onChange={(event) => {
+                          const options = [...editing.options];
+                          options[index] = event.target.value;
+                          setEditing({ ...editing, options });
+                        }}
+                        className="min-w-0 flex-1 rounded-lg border p-3"
+                      />
+                      <button
+                        type="button"
+                        disabled={
+                          editing.options.length <= MIN_CHOICE_OPTIONS
+                        }
+                        onClick={() => {
+                          const removed = editing.options[index];
+                          const options = editing.options.filter(
+                            (_, optionIndex) => optionIndex !== index,
+                          );
+                          setEditing({
+                            ...editing,
+                            options,
+                            answer:
+                              editing.answer === removed &&
+                              !options.includes(removed)
+                                ? ""
+                                : editing.answer,
+                          });
+                        }}
+                        className="rounded-lg border px-3 text-red-600 disabled:text-gray-300"
+                      >
+                        削除
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    disabled={editing.options.length >= MAX_CHOICE_OPTIONS}
+                    onClick={() =>
+                      setEditing({
+                        ...editing,
+                        options: [...editing.options, ""],
+                      })
+                    }
+                    className="rounded-lg border border-blue-600 px-4 py-2 text-sm font-bold text-blue-700 disabled:border-gray-300 disabled:text-gray-400"
+                  >
+                    ＋ 選択肢を追加
+                  </button>
+                </div>
+              )}
               {editing.type !== "essay" && (
                 <label>
                   正解
