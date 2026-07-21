@@ -68,11 +68,14 @@ export default function Home() {
   const studyAvailable =
     subject?.questions.filter((q) => studyTypes.includes(q.type)).length || 0;
   const saveSubject = (s: Subject) =>
-    setSubjects((v) =>
-      v.some((x) => x.id === s.id)
-        ? v.map((x) => (x.id === s.id ? s : x))
-        : [...v, s],
-    );
+    setSubjects((current) => {
+      const unique = Array.from(
+        new Map(current.map((item) => [item.id, item])).values(),
+      );
+      return unique.some((item) => item.id === s.id)
+        ? unique.map((item) => (item.id === s.id ? s : item))
+        : [...unique, s];
+    });
   async function signOut() {
     await signOutCloud();
     setSelected("");
