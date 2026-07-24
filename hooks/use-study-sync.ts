@@ -9,6 +9,7 @@ import {
   type SetStateAction,
 } from "react";
 import type { Session } from "@supabase/supabase-js";
+import { dedupeQuestions } from "@/lib/questions";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import type { Attempt, Subject, SyncStatus } from "@/lib/study-types";
 
@@ -19,7 +20,19 @@ const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
 const serialize = (subjects: Subject[], attempts: Attempt[]) =>
   JSON.stringify({ subjects, attempts });
 const dedupeSubjects = (subjects: Subject[]) =>
-  Array.from(new Map(subjects.map((subject) => [subject.id, subject])).values());
+  Array.from(
+    new Map(
+      subjects.map((subject) => [
+        subject.id,
+        {
+          ...subject,
+          questions: dedupeQuestions(
+            Array.isArray(subject.questions) ? subject.questions : [],
+          ),
+        },
+      ]),
+    ).values(),
+  );
 const readJson = <T>(key: string, fallback: T): T => {
   try {
     return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback));
