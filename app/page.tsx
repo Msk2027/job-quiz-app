@@ -2,6 +2,7 @@
 import { useMemo, useState } from "react";
 import { AuthScreen } from "@/components/auth-screen";
 import { useStudySync } from "@/hooks/use-study-sync";
+import { scoreExam, shuffle } from "@/lib/exam";
 import {
   blankQuestion,
   dedupeQuestions,
@@ -20,6 +21,15 @@ import type {
 } from "@/lib/study-types";
 
 type PendingImport = { name: string; url: string };
+type ActiveQuestion = Question & {
+  sourceSubjectId: string;
+  sourceSubjectName: string;
+};
+type ExamSettings = {
+  subjectIds: string[];
+  subjectNames: string[];
+  passPercentage: number;
+};
 const uid = () => crypto.randomUUID();
 
 export default function Home() {
@@ -40,7 +50,7 @@ export default function Home() {
     >("home"),
     [selected, setSelected] = useState("");
   const [editing, setEditing] = useState<Question | null>(null),
-    [active, setActive] = useState<Question[]>([]),
+    [active, setActive] = useState<ActiveQuestion[]>([]),
     [index, setIndex] = useState(0),
     [draft, setDraft] = useState(""),
     [answers, setAnswers] = useState<Attempt["answers"]>([]),
@@ -61,13 +71,44 @@ export default function Home() {
     ]),
     [studyCount, setStudyCount] = useState("1"),
     [lastInterrupted, setLastInterrupted] = useState(false);
+  const [showExamSetup, setShowExamSetup] = useState(false),
+    [examSubjectIds, setExamSubjectIds] = useState<string[]>([]),
+    [examTypes, setExamTypes] = useState<QType[]>([
+      "choice",
+      "ox",
+      "fill",
+      "essay",
+    ]),
+    [examCount, setExamCount] = useState("1"),
+    [examPassPercentage, setExamPassPercentage] = useState("90"),
+    [sessionMode, setSessionMode] = useState<"study" | "exam">("study"),
+    [examSettings, setExamSettings] = useState<ExamSettings | null>(null),
+    [lastAttempt, setLastAttempt] = useState<Attempt | null>(null);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
-    () => attempts.filter((a) => a.subjectId === selected),
+    () =>
+      attempts.filter(
+        (attempt) =>
+          attempt.mode !== "exam" && attempt.subjectId === selected,
+      ),
     [attempts, selected],
   );
   const studyAvailable =
     subject?.questions.filter((q) => studyTypes.includes(q.type)).length || 0;
+  const examAttempts = useMemo(
+    () => attempts.filter((attempt) => attempt.mode === "exam"),
+    [attempts],
+  );
+  const latestExam = examAttempts[0];
+  const examAvailable = subjects
+    .filter((item) => examSubjectIds.includes(item.id))
+    .reduce(
+      (total, item) =>
+        total +
+        item.questions.filter((question) => examTypes.includes(question.type))
+          .length,
+      0,
+    );
   const saveSubject = (s: Subject) =>
     setSubjects((current) => {
       const unique = Array.from(
@@ -95,7 +136,13 @@ export default function Home() {
     )
       return;
     setSubjects((v) => v.filter((s) => s.id !== subject.id));
-    setAttempts((v) => v.filter((a) => a.subjectId !== subject.id));
+    setAttempts((current) =>
+      current.filter(
+        (attempt) =>
+          attempt.subjectId !== subject.id &&
+          !attempt.subjectIds?.includes(subject.id),
+      ),
+    );
     setSelected("");
     setView("home");
   }
@@ -227,6 +274,23 @@ export default function Home() {
     setStudyCount(String(subject.questions.length));
     setShowStudySetup(true);
   }
+  function openExamSetup() {
+    const availableSubjects = subjects.filter(
+      (item) => item.questions.length > 0,
+    );
+    if (!availableSubjects.length)
+      return alert("問題が登録された科目を追加してください");
+    const subjectIds = availableSubjects.map((item) => item.id);
+    const questionCount = availableSubjects.reduce(
+      (total, item) => total + item.questions.length,
+      0,
+    );
+    setExamSubjectIds(subjectIds);
+    setExamTypes(["choice", "ox", "fill", "essay"]);
+    setExamCount(String(questionCount));
+    setExamPassPercentage("90");
+    setShowExamSetup(true);
+  }
   function start() {
     if (!subject) return;
     const candidates = subject.questions.filter((q) =>
@@ -254,14 +318,71 @@ export default function Home() {
       .sort((a, b) => b.key - a.key)
       .slice(0, Math.min(requestedCount, candidates.length))
       .map((item) => item.question);
-    setActive(prioritized);
+    setActive(
+      prioritized.map((question) => ({
+        ...question,
+        sourceSubjectId: subject.id,
+        sourceSubjectName: subject.name,
+      })),
+    );
     setIndex(0);
     setAnswers([]);
     setDraft("");
     setFeedback(null);
     setSubmitted(false);
     setLastInterrupted(false);
+    setSessionMode("study");
+    setExamSettings(null);
     setShowStudySetup(false);
+    setView("play");
+  }
+  function startExam() {
+    if (!examSubjectIds.length) return alert("科目を1つ以上選択してください");
+    if (!examTypes.length) return alert("問題形式を1つ以上選択してください");
+    const requestedCount = Number(examCount);
+    if (!Number.isInteger(requestedCount) || requestedCount < 1)
+      return alert("問題数は1以上の数字を入力してください");
+    const passPercentage = Number(examPassPercentage);
+    if (
+      !Number.isInteger(passPercentage) ||
+      passPercentage < 1 ||
+      passPercentage > 100
+    )
+      return alert("合格基準は1〜100の整数で入力してください");
+    const targetSubjects = subjects.filter((item) =>
+      examSubjectIds.includes(item.id),
+    );
+    const candidates = targetSubjects.flatMap((item) =>
+      item.questions
+        .filter((question) => examTypes.includes(question.type))
+        .map((question) => ({
+          ...question,
+          sourceSubjectId: item.id,
+          sourceSubjectName: item.name,
+        })),
+    );
+    if (!candidates.length) return alert("出題できる問題がありません");
+    const selectedQuestions = shuffle(candidates).slice(
+      0,
+      Math.min(requestedCount, candidates.length),
+    );
+    const subjectNames = targetSubjects.map((item) => item.name);
+    setActive(selectedQuestions);
+    setIndex(0);
+    setAnswers([]);
+    setDraft("");
+    setFeedback(null);
+    setSubmitted(false);
+    setLastInterrupted(false);
+    setLastAttempt(null);
+    setSessionMode("exam");
+    setExamSettings({
+      subjectIds: targetSubjects.map((item) => item.id),
+      subjectNames,
+      passPercentage,
+    });
+    setSelected(targetSubjects[0]?.id || "");
+    setShowExamSetup(false);
     setView("play");
   }
   function submit() {
@@ -269,33 +390,46 @@ export default function Home() {
     let correct: boolean | null = null;
     if (q.type !== "essay")
       correct = draft.trim().toLowerCase() === q.answer.trim().toLowerCase();
-    setFeedback(correct);
-    setSubmitted(true);
-    setAnswers((a) => [
-      ...a,
-      {
-        questionId: q.id,
-        question: q.question,
-        type: q.type,
-        answer: draft,
-        correct,
-        correctAnswer: q.answer,
-        explanation: q.explanation,
-        modelAnswer: q.modelAnswer,
-        rubric: q.rubric,
-      },
-    ]);
-  }
-  function saveAttempt(interrupted: boolean) {
-    const scored = answers;
-    if (!scored.length) {
-      if (interrupted) {
-        alert("まだ回答した問題がないため、結果は保存されません");
-        setView("subject");
+    const record: Attempt["answers"][number] = {
+      questionId: q.id,
+      subjectId: q.sourceSubjectId,
+      subjectName: q.sourceSubjectName,
+      question: q.question,
+      type: q.type,
+      answer: draft,
+      correct,
+      correctAnswer: q.answer,
+      explanation: q.explanation,
+      modelAnswer: q.modelAnswer,
+      rubric: q.rubric,
+    };
+    const nextAnswers = [...answers, record];
+    setAnswers(nextAnswers);
+    if (sessionMode === "exam") {
+      if (index + 1 < active.length) {
+        setIndex((current) => current + 1);
+        setDraft("");
+      } else {
+        saveAttempt(false, nextAnswers);
       }
       return;
     }
-    const attempt: Attempt = {
+    setFeedback(correct);
+    setSubmitted(true);
+  }
+  function saveAttempt(
+    interrupted: boolean,
+    answerOverride: Attempt["answers"] = answers,
+  ) {
+    const scored = answerOverride;
+    if (!scored.length) {
+      if (interrupted) {
+        alert("まだ回答した問題がないため、結果は保存されません");
+        setView(sessionMode === "exam" ? "home" : "subject");
+      }
+      return;
+    }
+    const baseAttempt: Attempt = {
       id: uid(),
       subjectId: selected,
       date: new Date().toLocaleString("ja-JP"),
@@ -304,7 +438,22 @@ export default function Home() {
       answers: scored,
       status: interrupted ? "interrupted" : "completed",
     };
+    const attempt: Attempt =
+      sessionMode === "exam" && examSettings
+        ? {
+            ...baseAttempt,
+            ...scoreExam(scored, examSettings.passPercentage),
+            mode: "exam",
+            subjectIds: examSettings.subjectIds,
+            subjectNames: examSettings.subjectNames,
+            passPercentage: examSettings.passPercentage,
+            passed: interrupted
+              ? undefined
+              : scoreExam(scored, examSettings.passPercentage).passed,
+          }
+        : { ...baseAttempt, mode: "study" };
     setAttempts((v) => [attempt, ...v].slice(0, 100));
+    setLastAttempt(attempt);
     setLastInterrupted(interrupted);
     setView("result");
   }
@@ -319,37 +468,44 @@ export default function Home() {
     }
   }
   function exportEssayText(attemptId?: string) {
-    if (!subject) return;
     const latest = attemptId
       ? attempts.find((a) => a.id === attemptId)
-      : attempts.find((a) => a.subjectId === subject.id);
+      : lastAttempt ||
+        (subject
+          ? attempts.find((a) => a.subjectId === subject.id)
+          : undefined);
     const essay =
       latest?.answers.filter(
-        (answer) =>
-          answer.type === "essay" ||
-          subject.questions.find((q) => q.id === answer.questionId)?.type ===
-            "essay",
+        (answer) => answer.type === "essay",
       ) || [];
     if (!essay.length) return alert("出力できる論述答案がありません");
+    const subjectLabel =
+      latest?.subjectNames?.join("・") || subject?.name || "試験モード";
     const instruction = [
       "【AIへの指示】",
       "あなたは大学の試験答案を採点する教員です。",
       "以下の各設問について、受験者の回答を模範解答と採点ポイントに照らして評価してください。",
       "採点後はExcel（.xlsx）ファイルを1つ作成してください。",
-      "1行目の列名は必ず attemptId, questionId, score, assessment, goodPoints, missingPoints, improvedAnswer としてください。",
-      "attemptIdとquestionIdは各設問に記載された値を一字も変更せず使用してください。",
+      "1行目の列名は必ず attemptId, subjectId, questionId, score, assessment, goodPoints, missingPoints, improvedAnswer としてください。",
+      "attemptId、subjectId、questionIdは各設問に記載された値を一字も変更せず使用してください。",
       "scoreは0から100の数値、その他の列は日本語の文章で入力してください。",
       "設問ごとに1行とし、列の追加・削除やセル結合はしないでください。",
       "資料にない事実を推測で補わず、採点ポイントを重視してください。",
     ].join("\n");
     const body = essay
       .map((answer, i) => {
-        const current = subject.questions.find(
-          (q) => q.id === answer.questionId,
-        );
+        const current = subjects
+          .find(
+            (item) =>
+              item.id ===
+              (answer.subjectId || latest?.subjectId || subject?.id),
+          )
+          ?.questions.find((q) => q.id === answer.questionId);
         return [
           `【設問${i + 1}】`,
+          `科目: ${answer.subjectName || subjectLabel}`,
           `attemptId: ${latest?.id || ""}`,
+          `subjectId: ${answer.subjectId || latest?.subjectId || ""}`,
           `questionId: ${answer.questionId}`,
           answer.question || current?.question || "問題文なし",
           "",
@@ -365,7 +521,7 @@ export default function Home() {
       })
       .join("\n\n----------------------------------------\n\n");
     const text = [
-      `科目：${subject.name}`,
+      `科目：${subjectLabel}`,
       `実施日時：${latest?.date || new Date().toLocaleString("ja-JP")}`,
       "",
       instruction,
@@ -380,7 +536,7 @@ export default function Home() {
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `${subject.name}-論述答案.txt`;
+    link.download = `${subjectLabel}-論述答案.txt`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -399,11 +555,12 @@ export default function Home() {
       const grades = new Map<string, EssayGrading>();
       for (const row of rows) {
         const rowAttemptId = String(row.attemptId || "").trim();
+        const subjectId = String(row.subjectId || "").trim();
         const questionId = String(row.questionId || "").trim();
         const score = Number(row.score);
         if (rowAttemptId !== attemptId || !questionId) continue;
         if (!Number.isFinite(score) || score < 0 || score > 100) continue;
-        grades.set(questionId, {
+        grades.set(`${subjectId}:${questionId}`, {
           score,
           assessment: String(row.assessment || ""),
           goodPoints: String(row.goodPoints || ""),
@@ -418,18 +575,22 @@ export default function Home() {
         );
       }
       setAttempts((current) =>
-        current.map((attempt) =>
-          attempt.id === attemptId
+        current.map((attempt) => {
+          if (attempt.id !== attemptId) return attempt;
+          const nextAnswers = attempt.answers.map((answer) => {
+            const exactKey = `${answer.subjectId || ""}:${answer.questionId}`;
+            const legacyKey = `:${answer.questionId}`;
+            const grading = grades.get(exactKey) || grades.get(legacyKey);
+            return grading ? { ...answer, grading } : answer;
+          });
+          return attempt.mode === "exam"
             ? {
                 ...attempt,
-                answers: attempt.answers.map((answer) =>
-                  grades.has(answer.questionId)
-                    ? { ...answer, grading: grades.get(answer.questionId) }
-                    : answer,
-                ),
+                ...scoreExam(nextAnswers, attempt.passPercentage || 90),
+                answers: nextAnswers,
               }
-            : attempt,
-        ),
+            : { ...attempt, answers: nextAnswers };
+        }),
       );
       alert(`${grades.size}問分のAI採点結果を取り込みました`);
     } catch {
@@ -505,6 +666,143 @@ export default function Home() {
                 ＋ 科目を追加
               </button>
             </div>
+            <section className="card mb-6 overflow-hidden">
+              <div className="bg-gradient-to-r from-[#17233f] to-blue-700 p-6 text-white md:p-8">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-bold text-blue-200">
+                      複数科目からランダム出題
+                    </p>
+                    <h2 className="mt-1 text-2xl font-black">試験モード</h2>
+                    <p className="mt-2 text-sm text-blue-100">
+                      途中では正誤を表示せず、終了後にまとめて判定します
+                    </p>
+                  </div>
+                  <button
+                    onClick={openExamSetup}
+                    className="rounded-xl bg-white px-6 py-3 font-black text-blue-700"
+                  >
+                    試験を設定して開始
+                  </button>
+                </div>
+                <div className="mt-6 grid grid-cols-2 gap-3 md:grid-cols-3">
+                  <div className="rounded-xl bg-white/10 p-4">
+                    <p className="text-xs text-blue-200">受験回数</p>
+                    <p className="mt-1 text-2xl font-black">
+                      {examAttempts.length}回
+                    </p>
+                  </div>
+                  <div className="rounded-xl bg-white/10 p-4">
+                    <p className="text-xs text-blue-200">合格回数</p>
+                    <p className="mt-1 text-2xl font-black">
+                      {
+                        examAttempts.filter(
+                          (attempt) =>
+                            attempt.status !== "interrupted" && attempt.passed,
+                        ).length
+                      }
+                      回
+                    </p>
+                  </div>
+                  <div className="col-span-2 rounded-xl bg-white/10 p-4 md:col-span-1">
+                    <p className="text-xs text-blue-200">最新結果</p>
+                    <p className="mt-1 text-lg font-black">
+                      {!latestExam
+                        ? "未受験"
+                        : latestExam.status === "interrupted"
+                          ? "途中中断"
+                          : latestExam.essayPending
+                            ? "論述採点待ち"
+                            : latestExam.passed
+                              ? "合格"
+                              : "不合格"}
+                    </p>
+                    {latestExam && (
+                      <p className="mt-1 text-xs text-blue-100">
+                        {latestExam.percentage ?? 0}%／合格基準
+                        {latestExam.passPercentage ?? 90}%
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+              {examAttempts.length > 0 && (
+                <div className="p-5 md:p-6">
+                  <h3 className="font-black">最近の試験結果</h3>
+                  <div className="mt-3 space-y-2">
+                    {examAttempts.slice(0, 5).map((attempt) => (
+                      <div
+                        key={attempt.id}
+                        className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3"
+                      >
+                        <div>
+                          <p className="font-bold">
+                            {attempt.subjectNames?.join("・") || "試験モード"}
+                          </p>
+                          <p className="mt-1 text-xs text-gray-500">
+                            {attempt.date}・{attempt.answers.length}問・合格基準
+                            {attempt.passPercentage ?? 90}%
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <span
+                            className={`font-black ${
+                              attempt.status === "interrupted"
+                                ? "text-gray-500"
+                                : attempt.essayPending
+                                  ? "text-amber-600"
+                                  : attempt.passed
+                                    ? "text-green-600"
+                                    : "text-red-600"
+                            }`}
+                          >
+                            {attempt.status === "interrupted"
+                              ? "途中中断"
+                              : attempt.essayPending
+                                ? "採点待ち"
+                                : attempt.passed
+                                  ? `合格 ${attempt.percentage}%`
+                                  : `不合格 ${attempt.percentage}%`}
+                          </span>
+                          {attempt.answers.some(
+                            (answer) => answer.type === "essay",
+                          ) && (
+                            <>
+                              <button
+                                onClick={() => exportEssayText(attempt.id)}
+                                className="text-sm font-bold text-blue-700"
+                              >
+                                答案出力
+                              </button>
+                              <label className="cursor-pointer text-sm font-bold text-blue-700">
+                                採点取込
+                                <input
+                                  type="file"
+                                  accept=".xlsx"
+                                  className="hidden"
+                                  onChange={(event) => {
+                                    const file = event.target.files?.[0];
+                                    if (file)
+                                      importEssayGrades(file, attempt.id);
+                                    event.target.value = "";
+                                  }}
+                                />
+                              </label>
+                            </>
+                          )}
+                          <button
+                            onClick={() => deleteAttempt(attempt)}
+                            className="text-sm font-bold text-red-500"
+                          >
+                            削除
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </section>
             <div className="grid md:grid-cols-2 gap-4">
               {subjects.map((s) => (
                 <button
@@ -1239,10 +1537,151 @@ export default function Home() {
             </div>
           </div>
         )}
+        {showExamSetup && (
+          <div className="fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/50 p-4">
+            <div className="card my-6 max-h-[92vh] w-full max-w-2xl overflow-y-auto p-6">
+              <h2 className="text-2xl font-black">試験設定</h2>
+              <p className="mt-1 text-gray-500">
+                複数の科目・授業回をまとめて出題できます
+              </p>
+
+              <p className="mb-3 mt-6 font-bold">出題する科目</p>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {subjects.map((item) => {
+                  const checked = examSubjectIds.includes(item.id);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      disabled={!item.questions.length}
+                      onClick={() =>
+                        setExamSubjectIds((current) =>
+                          checked
+                            ? current.filter((id) => id !== item.id)
+                            : [...current, item.id],
+                        )
+                      }
+                      className={
+                        "rounded-xl border-2 p-4 text-left disabled:opacity-40 " +
+                        (checked
+                          ? "border-blue-600 bg-blue-50 text-blue-700"
+                          : "border-gray-200")
+                      }
+                    >
+                      <b>{checked ? "✓ " : ""}{item.name}</b>
+                      <span className="mt-1 block text-sm">
+                        {item.questions.length}問
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <p className="mb-3 mt-6 font-bold">問題形式</p>
+              <div className="grid grid-cols-2 gap-3">
+                {(["choice", "ox", "fill", "essay"] as QType[]).map((type) => {
+                  const checked = examTypes.includes(type);
+                  const typeCount = subjects
+                    .filter((item) => examSubjectIds.includes(item.id))
+                    .reduce(
+                      (total, item) =>
+                        total +
+                        item.questions.filter(
+                          (question) => question.type === type,
+                        ).length,
+                      0,
+                    );
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      disabled={!typeCount}
+                      onClick={() =>
+                        setExamTypes((current) =>
+                          checked
+                            ? current.filter((item) => item !== type)
+                            : [...current, type],
+                        )
+                      }
+                      className={
+                        "rounded-xl border-2 p-4 text-left disabled:opacity-40 " +
+                        (checked
+                          ? "border-blue-600 bg-blue-50 text-blue-700"
+                          : "border-gray-200")
+                      }
+                    >
+                      <b>{typeName[type]}</b>
+                      <span className="mt-1 block text-sm">{typeCount}問</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="mt-6 grid gap-5 sm:grid-cols-2">
+                <label className="font-bold">
+                  問題数
+                  <span className="ml-2 text-sm font-normal text-gray-500">
+                    最大{examAvailable}問
+                  </span>
+                  <input
+                    type="number"
+                    min="1"
+                    max={Math.max(1, examAvailable)}
+                    value={examCount}
+                    onChange={(event) => setExamCount(event.target.value)}
+                    className="mt-2 block w-full rounded-lg border p-3"
+                  />
+                </label>
+                <label className="font-bold">
+                  合格基準
+                  <span className="ml-2 text-sm font-normal text-gray-500">
+                    デフォルト90%
+                  </span>
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={examPassPercentage}
+                      onChange={(event) =>
+                        setExamPassPercentage(event.target.value)
+                      }
+                      className="block w-full rounded-lg border p-3"
+                    />
+                    <span className="font-black">%</span>
+                  </div>
+                </label>
+              </div>
+
+              <div className="mt-5 rounded-xl bg-blue-50 p-4 text-sm text-blue-800">
+                途中では正誤と解説を表示しません。論述問題を含む場合は、
+                AI採点結果を取り込むまで最終合否は「採点待ち」になります。
+              </div>
+              <div className="mt-6 flex justify-end gap-3">
+                <button onClick={() => setShowExamSetup(false)}>
+                  キャンセル
+                </button>
+                <button
+                  onClick={startExam}
+                  disabled={!examAvailable}
+                  className="rounded-xl bg-blue-600 px-6 py-3 font-bold text-white disabled:bg-gray-300"
+                >
+                  試験を開始
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {view === "play" && active[index] && (
           <div className="card p-6 md:p-10 max-w-3xl mx-auto">
             <div className="flex justify-between text-sm text-gray-500 mb-6">
-              <span>{typeName[active[index].type]}</span>
+              <span>
+                {sessionMode === "exam" && (
+                  <b className="mr-2 text-blue-700">試験モード</b>
+                )}
+                {active[index].sourceSubjectName}・
+                {typeName[active[index].type]}
+              </span>
               <div className="flex items-center gap-3">
                 <span>
                   {index + 1}/{active.length}
@@ -1254,7 +1693,7 @@ export default function Home() {
                   }
                   className="text-red-600 border border-red-200 px-3 py-1 rounded-full font-bold"
                 >
-                  中断して保存
+                  {sessionMode === "exam" ? "試験を中断" : "中断して保存"}
                 </button>
               </div>
             </div>
@@ -1314,7 +1753,11 @@ export default function Home() {
                   onClick={submit}
                   className="bg-blue-600 disabled:bg-gray-300 text-white px-7 py-3 rounded-xl font-bold"
                 >
-                  回答する
+                  {sessionMode === "exam"
+                    ? index + 1 === active.length
+                      ? "回答して結果へ"
+                      : "回答して次へ"
+                    : "回答する"}
                 </button>
               ) : (
                 <button
@@ -1327,26 +1770,69 @@ export default function Home() {
             </div>
           </div>
         )}
-        {view === "result" && subject && (
+        {view === "result" && lastAttempt && (
           <div className="card max-w-xl mx-auto text-center p-10">
             <h1 className="text-3xl font-black">
-              {lastInterrupted ? "途中結果を保存しました" : "学習完了"}
+              {lastInterrupted
+                ? "途中結果を保存しました"
+                : lastAttempt.mode === "exam"
+                  ? lastAttempt.essayPending
+                    ? "論述採点待ち"
+                    : lastAttempt.passed
+                      ? "合格"
+                      : "不合格"
+                  : "学習完了"}
             </h1>
-            <p className="text-gray-500 mt-2">
-              論述問題はテキストにまとめてAIで採点できます
-            </p>
+            {lastAttempt.mode === "exam" ? (
+              <>
+                <p className="mt-3 text-gray-500">
+                  {lastAttempt.subjectNames?.join("・")}
+                </p>
+                <div className="mt-6 rounded-2xl bg-gray-50 p-6">
+                  <p className="text-sm text-gray-500">
+                    {lastAttempt.essayPending
+                      ? "自動採点できる問題の暫定結果"
+                      : "最終得点率"}
+                  </p>
+                  <p className="mt-1 text-4xl font-black text-blue-700">
+                    {lastAttempt.percentage ?? 0}%
+                  </p>
+                  <p className="mt-2 text-sm text-gray-500">
+                    合格基準 {lastAttempt.passPercentage ?? 90}%・択一等{" "}
+                    {lastAttempt.score}/{lastAttempt.total}
+                  </p>
+                </div>
+                {lastAttempt.essayPending && (
+                  <p className="mt-4 text-sm text-amber-700">
+                    論述答案をAIで採点し、Excelを取り込むと最終合否が確定します。
+                  </p>
+                )}
+              </>
+            ) : (
+              <p className="text-gray-500 mt-2">
+                論述問題はテキストにまとめてAIで採点できます
+              </p>
+            )}
             <div className="flex flex-col gap-3 mt-8">
+              {lastAttempt.answers.some(
+                (answer) => answer.type === "essay",
+              ) && (
+                <button
+                  onClick={() => exportEssayText(lastAttempt.id)}
+                  className="bg-blue-600 text-white py-3 rounded-xl font-bold"
+                >
+                  論述答案をテキスト出力
+                </button>
+              )}
               <button
-                onClick={() => exportEssayText()}
-                className="bg-blue-600 text-white py-3 rounded-xl font-bold"
-              >
-                論述答案をテキスト出力
-              </button>
-              <button
-                onClick={() => setView("subject")}
+                onClick={() =>
+                  setView(lastAttempt.mode === "exam" ? "home" : "subject")
+                }
                 className="border py-3 rounded-xl font-bold"
               >
-                科目へ戻る
+                {lastAttempt.mode === "exam"
+                  ? "メイン画面へ戻る"
+                  : "科目へ戻る"}
               </button>
             </div>
           </div>
