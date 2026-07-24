@@ -70,6 +70,8 @@ export default function Home() {
       "essay",
     ]),
     [studyCount, setStudyCount] = useState("1"),
+    [studyExamMode, setStudyExamMode] = useState(false),
+    [studyPassPercentage, setStudyPassPercentage] = useState("90"),
     [lastInterrupted, setLastInterrupted] = useState(false);
   const [showExamSetup, setShowExamSetup] = useState(false),
     [examSubjectIds, setExamSubjectIds] = useState<string[]>([]),
@@ -272,6 +274,8 @@ export default function Home() {
     if (!subject?.questions.length) return alert("問題を追加してください");
     setStudyTypes(["choice", "ox", "fill", "essay"]);
     setStudyCount(String(subject.questions.length));
+    setStudyExamMode(false);
+    setStudyPassPercentage("90");
     setShowStudySetup(true);
   }
   function openExamSetup() {
@@ -300,26 +304,42 @@ export default function Home() {
     const requestedCount = Number(studyCount);
     if (!Number.isInteger(requestedCount) || requestedCount < 1)
       return alert("1以上の数字を入力してください");
-    const answerCounts = new Map<string, number>();
-    stats.forEach((attempt) =>
-      (attempt.answers || []).forEach((answer) =>
-        answerCounts.set(
-          answer.questionId,
-          (answerCounts.get(answer.questionId) || 0) + 1,
+    const passPercentage = Number(studyPassPercentage);
+    if (
+      studyExamMode &&
+      (!Number.isInteger(passPercentage) ||
+        passPercentage < 1 ||
+        passPercentage > 100)
+    )
+      return alert("合格基準は1〜100の整数で入力してください");
+    let selectedQuestions: Question[];
+    if (studyExamMode) {
+      selectedQuestions = shuffle(candidates).slice(
+        0,
+        Math.min(requestedCount, candidates.length),
+      );
+    } else {
+      const answerCounts = new Map<string, number>();
+      stats.forEach((attempt) =>
+        (attempt.answers || []).forEach((answer) =>
+          answerCounts.set(
+            answer.questionId,
+            (answerCounts.get(answer.questionId) || 0) + 1,
+          ),
         ),
-      ),
-    );
-    const prioritized = candidates
-      .map((question) => {
-        const count = answerCounts.get(question.id) || 0;
-        const weight = 1 + 3 / (count + 1);
-        return { question, key: Math.pow(Math.random(), 1 / weight) };
-      })
-      .sort((a, b) => b.key - a.key)
-      .slice(0, Math.min(requestedCount, candidates.length))
-      .map((item) => item.question);
+      );
+      selectedQuestions = candidates
+        .map((question) => {
+          const count = answerCounts.get(question.id) || 0;
+          const weight = 1 + 3 / (count + 1);
+          return { question, key: Math.pow(Math.random(), 1 / weight) };
+        })
+        .sort((a, b) => b.key - a.key)
+        .slice(0, Math.min(requestedCount, candidates.length))
+        .map((item) => item.question);
+    }
     setActive(
-      prioritized.map((question) => ({
+      selectedQuestions.map((question) => ({
         ...question,
         sourceSubjectId: subject.id,
         sourceSubjectName: subject.name,
@@ -331,8 +351,17 @@ export default function Home() {
     setFeedback(null);
     setSubmitted(false);
     setLastInterrupted(false);
-    setSessionMode("study");
-    setExamSettings(null);
+    setLastAttempt(null);
+    setSessionMode(studyExamMode ? "exam" : "study");
+    setExamSettings(
+      studyExamMode
+        ? {
+            subjectIds: [subject.id],
+            subjectNames: [subject.name],
+            passPercentage,
+          }
+        : null,
+    );
     setShowStudySetup(false);
     setView("play");
   }
@@ -1519,8 +1548,45 @@ export default function Home() {
                   className="mt-3 w-28 border p-2 rounded-lg text-center font-bold"
                 />
               </div>
+              <label className="mt-6 flex cursor-pointer items-start gap-3 rounded-xl border-2 border-blue-200 bg-blue-50 p-4">
+                <input
+                  type="checkbox"
+                  checked={studyExamMode}
+                  onChange={(event) => setStudyExamMode(event.target.checked)}
+                  className="mt-1 h-5 w-5 accent-blue-600"
+                />
+                <span>
+                  <b className="block text-blue-800">試験モードで実施する</b>
+                  <span className="mt-1 block text-sm text-blue-700">
+                    途中では正誤・解説を表示せず、終了後にまとめて合否を判定します
+                  </span>
+                </span>
+              </label>
+              {studyExamMode && (
+                <label className="mt-4 block font-bold">
+                  合格基準
+                  <span className="ml-2 text-sm font-normal text-gray-500">
+                    デフォルト90%
+                  </span>
+                  <div className="mt-2 flex max-w-48 items-center gap-2">
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={studyPassPercentage}
+                      onChange={(event) =>
+                        setStudyPassPercentage(event.target.value)
+                      }
+                      className="w-full rounded-lg border p-3"
+                    />
+                    <span className="font-black">%</span>
+                  </div>
+                </label>
+              )}
               <div className="bg-amber-50 text-amber-800 text-sm p-3 rounded-xl mt-5">
-                未回答・回答回数の少ない問題を優先しつつ、回答済みの問題もランダムに出題します。
+                {studyExamMode
+                  ? "この科目の対象問題からランダムに出題します。論述を含む場合はAI採点後に最終合否が確定します。"
+                  : "未回答・回答回数の少ない問題を優先しつつ、回答済みの問題もランダムに出題します。"}
               </div>
               <div className="flex justify-end gap-3 mt-6">
                 <button onClick={() => setShowStudySetup(false)}>
