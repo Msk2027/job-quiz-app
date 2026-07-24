@@ -6,13 +6,22 @@
 
 1. Supabaseでプロジェクトを作成します。
 2. Supabaseの SQL Editor で [`supabase/schema.sql`](supabase/schema.sql) を実行します。
-3. Supabaseの Authentication > Providers で Email を有効にします。
-4. Vercelに次の環境変数を設定し、再デプロイします。
+3. 続けて
+   [`supabase/migrations/20260725010000_relational_study_storage.sql`](supabase/migrations/20260725010000_relational_study_storage.sql)
+   を実行します。GitHub Integrationを有効にしている場合は、mainへの反映時に
+   `supabase/migrations`の変更が自動適用されます。
+4. Supabaseの Authentication > Providers で Email を有効にします。
+5. Vercelに次の環境変数を設定し、再デプロイします。
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
-5. Supabaseの Authentication > URL Configuration で Site URL をVercelの本番URLにします。
+6. Supabaseの Authentication > URL Configuration で Site URL をVercelの本番URLにします。
 
 環境変数が未設定の場合は、従来どおり端末内だけに保存されます。設定後に初めてログインしたとき、クラウド側が空ならその端末に残っている科目・問題・履歴を自動で移行します。
+
+新方式では、科目・問題・履歴・回答を分割テーブルに保存します。従来の
+`user_data`にも同じ内容をバックアップし続けるため、移行中も旧データは削除されません。
+緊急時はVercelに`NEXT_PUBLIC_STUDY_STORAGE_MODE=legacy`を設定して再デプロイすると、
+旧`user_data`方式へ戻せます。
 
 ## 選択式問題のCSV列
 
