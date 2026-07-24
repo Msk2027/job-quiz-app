@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { AuthScreen } from "@/components/auth-screen";
 import { useStudySync } from "@/hooks/use-study-sync";
 import { scoreExam, shuffle } from "@/lib/exam";
@@ -31,6 +31,18 @@ type ExamSettings = {
   passPercentage: number;
 };
 const uid = () => crypto.randomUUID();
+const upsertSubject = (current: Subject[], subject: Subject) => {
+  const unique = Array.from(
+    new Map(current.map((item) => [item.id, item])).values(),
+  );
+  const nextSubject = {
+    ...subject,
+    questions: dedupeQuestions(subject.questions),
+  };
+  return unique.some((item) => item.id === subject.id)
+    ? unique.map((item) => (item.id === subject.id ? nextSubject : item))
+    : [...unique, nextSubject];
+};
 
 export default function Home() {
   const {
@@ -42,6 +54,7 @@ export default function Home() {
     session,
     authChecked,
     syncStatus,
+    saveNow,
     retrySync,
     signOut: signOutCloud,
   } = useStudySync();
@@ -59,6 +72,8 @@ export default function Home() {
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(
     null,
   );
+  const [loadingMessage, setLoadingMessage] = useState<string | null>(null);
+  const operationLock = useRef(false);
   const [subjectSettings, setSubjectSettings] = useState<Subject | null>(null),
     [settingsLoading, setSettingsLoading] = useState(false);
   const [expandedAttempt, setExpandedAttempt] = useState<string | null>(null);
@@ -85,7 +100,9 @@ export default function Home() {
     [examPassPercentage, setExamPassPercentage] = useState("90"),
     [sessionMode, setSessionMode] = useState<"study" | "exam">("study"),
     [examSettings, setExamSettings] = useState<ExamSettings | null>(null),
-    [lastAttempt, setLastAttempt] = useState<Attempt | null>(null);
+    [lastAttempt, setLastAttempt] = useState<Attempt | null>(null),
+    [resultSaving, setResultSaving] = useState(false),
+    [resultSaveError, setResultSaveError] = useState(false);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
     () =>
@@ -112,18 +129,21 @@ export default function Home() {
       0,
     );
   const saveSubject = (s: Subject) =>
-    setSubjects((current) => {
-      const unique = Array.from(
-        new Map(current.map((item) => [item.id, item])).values(),
-      );
-      const nextSubject = {
-        ...s,
-        questions: dedupeQuestions(s.questions),
-      };
-      return unique.some((item) => item.id === s.id)
-        ? unique.map((item) => (item.id === s.id ? nextSubject : item))
-        : [...unique, nextSubject];
-    });
+    setSubjects((current) => upsertSubject(current, s));
+  async function runWithLoading<T>(message: string, task: () => Promise<T>) {
+    if (operationLock.current) return;
+    operationLock.current = true;
+    setLoadingMessage(message);
+    await new Promise<void>((resolve) =>
+      window.requestAnimationFrame(() => resolve()),
+    );
+    try {
+      return await task();
+    } finally {
+      operationLock.current = false;
+      setLoadingMessage(null);
+    }
+  }
   async function signOut() {
     await signOutCloud();
     setSelected("");
@@ -173,22 +193,31 @@ export default function Home() {
   }
   async function finishImport(mode: "sync" | "copy") {
     if (!pendingImport) return;
-    try {
-      const questions = await loadSheet(pendingImport.url);
-      const s: Subject = {
-        id: uid(),
-        name: pendingImport.name,
-        color: "#3167e3",
-        source: { url: pendingImport.url, mode },
-        questions,
-      };
-      saveSubject(s);
-      setSelected(s.id);
-      setView("subject");
-      setPendingImport(null);
-    } catch {
-      alert("シートを読み込めませんでした。公開CSV URLを確認してください。");
-    }
+    await runWithLoading(
+      "スプレッドシートから問題を作成しています…",
+      async () => {
+        try {
+          const questions = await loadSheet(pendingImport.url);
+          const s: Subject = {
+            id: uid(),
+            name: pendingImport.name,
+            color: "#3167e3",
+            source: { url: pendingImport.url, mode },
+            questions,
+          };
+          const nextSubjects = upsertSubject(subjects, s);
+          setSubjects(nextSubjects);
+          await saveNow({ subjects: nextSubjects, attempts });
+          setSelected(s.id);
+          setView("subject");
+          setPendingImport(null);
+        } catch {
+          alert(
+            "問題を作成・保存できませんでした。通信状態と公開CSV URLを確認してください。",
+          );
+        }
+      },
+    );
   }
   async function reloadSettings() {
     if (!subjectSettings?.source?.url)
@@ -228,19 +257,21 @@ export default function Home() {
     setSubjectSettings(null);
   }
   async function openSubject(s: Subject) {
-    let next = s;
-    if (s.source?.mode === "sync") {
-      try {
-        next = { ...s, questions: await loadSheet(s.source.url) };
-        saveSubject(next);
-      } catch {
-        alert("同期に失敗したため、保存済みデータを表示します");
+    await runWithLoading("問題を読み込んでいます…", async () => {
+      let next = s;
+      if (s.source?.mode === "sync") {
+        try {
+          next = { ...s, questions: await loadSheet(s.source.url) };
+          saveSubject(next);
+        } catch {
+          alert("同期に失敗したため、保存済みデータを表示します");
+        }
       }
-    }
-    setSelected(s.id);
-    setView("subject");
+      setSelected(s.id);
+      setView("subject");
+    });
   }
-  function saveQuestion() {
+  async function saveQuestion() {
     if (!subject || !editing?.question.trim())
       return alert("問題文を入力してください");
     let nextQuestion = editing;
@@ -255,20 +286,25 @@ export default function Home() {
         return alert("正解には、入力した選択肢と同じ文章を設定してください");
       nextQuestion = { ...editing, options, answer };
     }
-    setSubjects((current) =>
-      current.map((item) =>
-        item.id !== subject.id
-          ? item
-          : {
-              ...item,
-              questions: dedupeQuestions([
-                ...item.questions.filter((q) => q.id !== nextQuestion.id),
-                nextQuestion,
-              ]),
-            },
-      ),
-    );
-    setEditing(null);
+    const nextSubject = {
+      ...subject,
+      questions: dedupeQuestions([
+        ...subject.questions.filter((q) => q.id !== nextQuestion.id),
+        nextQuestion,
+      ]),
+    };
+    await runWithLoading("問題を保存しています…", async () => {
+      const nextSubjects = upsertSubject(subjects, nextSubject);
+      setSubjects(nextSubjects);
+      try {
+        await saveNow({ subjects: nextSubjects, attempts });
+        setEditing(null);
+      } catch {
+        alert(
+          "クラウドへの保存に失敗しました。内容はこの端末に残っているため、通信を確認して再試行してください。",
+        );
+      }
+    });
   }
   function openStudySetup() {
     if (!subject?.questions.length) return alert("問題を追加してください");
@@ -446,7 +482,7 @@ export default function Home() {
     setFeedback(correct);
     setSubmitted(true);
   }
-  function saveAttempt(
+  async function saveAttempt(
     interrupted: boolean,
     answerOverride: Attempt["answers"] = answers,
   ) {
@@ -481,10 +517,34 @@ export default function Home() {
               : scoreExam(scored, examSettings.passPercentage).passed,
           }
         : { ...baseAttempt, mode: "study" };
-    setAttempts((v) => [attempt, ...v].slice(0, 100));
+    const nextAttempts = [
+      attempt,
+      ...attempts.filter((item) => item.id !== attempt.id),
+    ].slice(0, 100);
+    setAttempts(nextAttempts);
     setLastAttempt(attempt);
     setLastInterrupted(interrupted);
+    setResultSaving(true);
+    setResultSaveError(false);
     setView("result");
+    try {
+      await saveNow({ subjects, attempts: nextAttempts });
+    } catch {
+      setResultSaveError(true);
+    } finally {
+      setResultSaving(false);
+    }
+  }
+  async function retryResultSave() {
+    setResultSaving(true);
+    setResultSaveError(false);
+    try {
+      await saveNow();
+    } catch {
+      setResultSaveError(true);
+    } finally {
+      setResultSaving(false);
+    }
   }
   function next() {
     if (index + 1 < active.length) {
@@ -678,6 +738,17 @@ export default function Home() {
           </div>
         </div>
       </header>
+      {loadingMessage && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-white/85 p-6 backdrop-blur-sm">
+          <div className="text-center">
+            <div className="mx-auto h-11 w-11 animate-spin rounded-full border-4 border-blue-100 border-t-blue-600" />
+            <p className="mt-4 font-bold text-gray-700">{loadingMessage}</p>
+            <p className="mt-1 text-sm text-gray-500">
+              そのままお待ちください
+            </p>
+          </div>
+        </div>
+      )}
       <div className="max-w-5xl mx-auto p-4 md:p-8">
         {view === "home" && (
           <>
@@ -1311,9 +1382,10 @@ export default function Home() {
                 <button onClick={() => setEditing(null)}>キャンセル</button>
                 <button
                   onClick={saveQuestion}
+                  disabled={Boolean(loadingMessage)}
                   className="bg-blue-600 text-white px-5 py-2 rounded-lg font-bold"
                 >
-                  保存
+                  {loadingMessage ? "保存中…" : "保存"}
                 </button>
               </div>
             </div>
@@ -1329,6 +1401,7 @@ export default function Home() {
               <div className="grid gap-3">
                 <button
                   onClick={() => finishImport("sync")}
+                  disabled={Boolean(loadingMessage)}
                   className="border-2 border-blue-600 bg-blue-50 text-blue-700 p-4 rounded-xl text-left"
                 >
                   <b className="block text-lg">同期型</b>
@@ -1338,6 +1411,7 @@ export default function Home() {
                 </button>
                 <button
                   onClick={() => finishImport("copy")}
+                  disabled={Boolean(loadingMessage)}
                   className="border-2 border-gray-300 p-4 rounded-xl text-left"
                 >
                   <b className="block text-lg">コピー型</b>
@@ -1593,7 +1667,11 @@ export default function Home() {
                   キャンセル
                 </button>
                 <button
-                  onClick={start}
+                  onClick={() =>
+                    runWithLoading("問題を準備しています…", async () => {
+                      start();
+                    })
+                  }
                   disabled={!studyAvailable}
                   className="bg-blue-600 disabled:bg-gray-300 text-white px-6 py-3 rounded-xl font-bold"
                 >
@@ -1728,7 +1806,11 @@ export default function Home() {
                   キャンセル
                 </button>
                 <button
-                  onClick={startExam}
+                  onClick={() =>
+                    runWithLoading("試験問題を準備しています…", async () => {
+                      startExam();
+                    })
+                  }
                   disabled={!examAvailable}
                   className="rounded-xl bg-blue-600 px-6 py-3 font-bold text-white disabled:bg-gray-300"
                 >
@@ -1839,7 +1921,11 @@ export default function Home() {
         {view === "result" && lastAttempt && (
           <div className="card max-w-xl mx-auto text-center p-10">
             <h1 className="text-3xl font-black">
-              {lastInterrupted
+              {resultSaving
+                ? "結果を保存しています…"
+                : resultSaveError
+                  ? "結果を保存できませんでした"
+                  : lastInterrupted
                 ? "途中結果を保存しました"
                 : lastAttempt.mode === "exam"
                   ? lastAttempt.essayPending
@@ -1849,6 +1935,22 @@ export default function Home() {
                       : "不合格"
                   : "学習完了"}
             </h1>
+            {resultSaving && (
+              <div className="mx-auto mt-5 h-9 w-9 animate-spin rounded-full border-4 border-blue-100 border-t-blue-600" />
+            )}
+            {resultSaveError && (
+              <div className="mt-5 rounded-xl bg-red-50 p-4 text-sm text-red-700">
+                <p>
+                  回答はこの端末に残っています。通信を確認して、もう一度保存してください。
+                </p>
+                <button
+                  onClick={retryResultSave}
+                  className="mt-3 rounded-lg bg-red-600 px-5 py-2 font-bold text-white"
+                >
+                  保存を再試行
+                </button>
+              </div>
+            )}
             {lastAttempt.mode === "exam" ? (
               <>
                 <p className="mt-3 text-gray-500">
@@ -1885,6 +1987,7 @@ export default function Home() {
               ) && (
                 <button
                   onClick={() => exportEssayText(lastAttempt.id)}
+                  disabled={resultSaving}
                   className="bg-blue-600 text-white py-3 rounded-xl font-bold"
                 >
                   論述答案をテキスト出力
@@ -1894,7 +1997,8 @@ export default function Home() {
                 onClick={() =>
                   setView(lastAttempt.mode === "exam" ? "home" : "subject")
                 }
-                className="border py-3 rounded-xl font-bold"
+                disabled={resultSaving}
+                className="border py-3 rounded-xl font-bold disabled:opacity-50"
               >
                 {lastAttempt.mode === "exam"
                   ? "メイン画面へ戻る"

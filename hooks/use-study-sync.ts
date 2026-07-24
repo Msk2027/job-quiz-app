@@ -23,6 +23,7 @@ import type { Attempt, Subject, SyncStatus } from "@/lib/study-types";
 const SUBJECTS_KEY = "study_subjects_v2";
 const ATTEMPTS_KEY = "study_attempts_v2";
 const CACHE_UPDATED_KEY = "study_cache_updated_v2";
+const CACHE_DIRTY_KEY = "study_cache_dirty_v2";
 const forceLegacyStorage =
   process.env.NEXT_PUBLIC_STUDY_STORAGE_MODE === "legacy";
 const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
@@ -68,6 +69,10 @@ const writeUserCache = (
     String(updatedAt),
   );
 };
+const markUserCacheDirty = (userId: string) =>
+  localStorage.setItem(userCacheKey(CACHE_DIRTY_KEY, userId), "1");
+const clearUserCacheDirty = (userId: string) =>
+  localStorage.removeItem(userCacheKey(CACHE_DIRTY_KEY, userId));
 
 export function useStudySync() {
   const [ready, setReady] = useState(false);
@@ -105,8 +110,10 @@ export function useStudySync() {
           typeof value === "function" ? value(current) : value,
         );
         subjectsRef.current = next;
-        if (sessionUserId)
+        if (sessionUserId) {
           writeUserCache(sessionUserId, next, attemptsRef.current);
+          markUserCacheDirty(sessionUserId);
+        }
         return next;
       }),
     [sessionUserId],
@@ -116,8 +123,10 @@ export function useStudySync() {
       setAttempts((current) => {
         const next = typeof value === "function" ? value(current) : value;
         attemptsRef.current = next;
-        if (sessionUserId)
+        if (sessionUserId) {
           writeUserCache(sessionUserId, subjectsRef.current, next);
+          markUserCacheDirty(sessionUserId);
+        }
         return next;
       }),
     [sessionUserId],
@@ -220,6 +229,8 @@ export function useStudySync() {
         cachedAttempts = attemptsRef.current;
       }
       const cachedSerialized = serialize(cachedSubjects, cachedAttempts);
+      const hasUnsyncedCache =
+        localStorage.getItem(userCacheKey(CACHE_DIRTY_KEY, userId)) === "1";
       const client = supabase!;
       const [legacy, relational] = await Promise.all([
         loadLegacyData(client, userId),
@@ -257,7 +268,9 @@ export function useStudySync() {
       const cachedHasData =
         cachedSubjects.length + cachedAttempts.length > 0;
       const shouldPersistLocal =
-        changedDuringLoad || (remoteIsEmpty && cachedHasData);
+        changedDuringLoad ||
+        hasUnsyncedCache ||
+        (remoteIsEmpty && cachedHasData);
 
       if (shouldPersistLocal) {
         const next: StudySnapshot = {
@@ -273,6 +286,7 @@ export function useStudySync() {
         if (!active) return;
         remote = next;
         remoteUpdatedAt = Date.parse(updatedAt);
+        clearUserCacheDirty(userId);
       } else if (
         relational.available &&
         legacy.updatedAt > relational.updatedAt
@@ -316,17 +330,19 @@ export function useStudySync() {
     };
   }, [ready, sessionUserId, syncRetry]);
 
-  useEffect(() => {
-    if (!supabase || !sessionUserId || !cloudReady) return;
-    const serialized = serialize(subjects, attempts);
-    if (serialized === lastSyncedData.current) return;
-    const client = supabase;
-    const nextSnapshot = { subjects, attempts };
-    const previousSnapshot = lastSyncedSnapshot.current;
-    const timer = window.setTimeout(() => {
+  const persistSnapshot = useCallback(
+    (nextSnapshot: StudySnapshot) => {
+      if (!supabase || !sessionUserId || !cloudReady)
+        return Promise.reject(new Error("クラウド同期の準備ができていません"));
+      const client = supabase;
+      const serialized = serialize(
+        nextSnapshot.subjects,
+        nextSnapshot.attempts,
+      );
       setSyncStatus("saving");
-      saveQueue.current = saveQueue.current.then(async () => {
+      const operation = saveQueue.current.then(async () => {
         const updatedAt = new Date().toISOString();
+        const previousSnapshot = lastSyncedSnapshot.current;
         try {
           if (storageMode.current === "relational") {
             try {
@@ -346,21 +362,48 @@ export function useStudySync() {
             nextSnapshot,
             updatedAt,
           );
-        } catch {
+        } catch (error) {
           setSyncStatus("error");
-          return;
+          throw error;
         }
         lastSyncedData.current = serialized;
         lastSyncedSnapshot.current = nextSnapshot;
         lastRemoteUpdatedAt.current = Date.parse(updatedAt);
         if (
           serialize(subjectsRef.current, attemptsRef.current) === serialized
-        )
+        ) {
+          clearUserCacheDirty(sessionUserId);
           setSyncStatus("saved");
+        }
       });
+      saveQueue.current = operation.catch(() => undefined);
+      return operation;
+    },
+    [sessionUserId, cloudReady],
+  );
+
+  useEffect(() => {
+    if (!supabase || !sessionUserId || !cloudReady) return;
+    const serialized = serialize(subjects, attempts);
+    if (serialized === lastSyncedData.current) return;
+    const nextSnapshot = { subjects, attempts };
+    const timer = window.setTimeout(() => {
+      if (serialized === lastSyncedData.current) return;
+      void persistSnapshot(nextSnapshot).catch(() => undefined);
     }, 700);
     return () => window.clearTimeout(timer);
-  }, [subjects, attempts, sessionUserId, cloudReady]);
+  }, [subjects, attempts, sessionUserId, cloudReady, persistSnapshot]);
+
+  const saveNow = useCallback(
+    (nextSnapshot?: StudySnapshot) =>
+      persistSnapshot(
+        nextSnapshot || {
+          subjects: subjectsRef.current,
+          attempts: attemptsRef.current,
+        },
+      ),
+    [persistSnapshot],
+  );
 
   async function signOut() {
     if (!supabase) return;
@@ -389,6 +432,7 @@ export function useStudySync() {
     session,
     authChecked,
     syncStatus,
+    saveNow,
     retrySync,
     signOut,
   };
