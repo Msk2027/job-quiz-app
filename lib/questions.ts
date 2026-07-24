@@ -5,6 +5,11 @@ const uid = () => crypto.randomUUID();
 export const MIN_CHOICE_OPTIONS = 2;
 export const MAX_CHOICE_OPTIONS = 10;
 
+export const dedupeQuestions = (questions: Question[]) =>
+  Array.from(
+    new Map(questions.map((question) => [question.id, question])).values(),
+  );
+
 const stableId = (value: string) => {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i++) {
@@ -68,7 +73,11 @@ export async function loadSheet(url: string) {
       header: true,
       skipEmptyLines: true,
       complete: ({ data }) =>
-        resolve(data.map(rowToQuestion).filter((q): q is Question => !!q)),
+        resolve(
+          dedupeQuestions(
+            data.map(rowToQuestion).filter((q): q is Question => !!q),
+          ),
+        ),
       error: reject,
     }),
   );
