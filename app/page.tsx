@@ -31,6 +31,10 @@ type ExamSettings = {
   passPercentage: number;
 };
 const uid = () => crypto.randomUUID();
+const shuffleChoiceOptions = <T extends Question>(question: T): T =>
+  question.type === "choice"
+    ? ({ ...question, options: shuffle(question.options) } as T)
+    : question;
 const upsertSubject = (current: Subject[], subject: Subject) => {
   const unique = Array.from(
     new Map(current.map((item) => [item.id, item])).values(),
@@ -376,7 +380,7 @@ export default function Home() {
     }
     setActive(
       selectedQuestions.map((question) => ({
-        ...question,
+        ...shuffleChoiceOptions(question),
         sourceSubjectId: subject.id,
         sourceSubjectName: subject.name,
       })),
@@ -427,10 +431,9 @@ export default function Home() {
         })),
     );
     if (!candidates.length) return alert("出題できる問題がありません");
-    const selectedQuestions = shuffle(candidates).slice(
-      0,
-      Math.min(requestedCount, candidates.length),
-    );
+    const selectedQuestions = shuffle(candidates)
+      .slice(0, Math.min(requestedCount, candidates.length))
+      .map(shuffleChoiceOptions);
     const subjectNames = targetSubjects.map((item) => item.name);
     setActive(selectedQuestions);
     setIndex(0);
