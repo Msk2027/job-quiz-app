@@ -10,12 +10,21 @@ import {
 } from "react";
 import type { Session } from "@supabase/supabase-js";
 import { dedupeQuestions } from "@/lib/questions";
+import {
+  loadLegacyData,
+  loadRelationalData,
+  saveLegacyBackup,
+  saveRelationalChanges,
+  type StudySnapshot,
+} from "@/lib/study-storage";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import type { Attempt, Subject, SyncStatus } from "@/lib/study-types";
 
 const SUBJECTS_KEY = "study_subjects_v2";
 const ATTEMPTS_KEY = "study_attempts_v2";
 const CACHE_UPDATED_KEY = "study_cache_updated_v2";
+const forceLegacyStorage =
+  process.env.NEXT_PUBLIC_STUDY_STORAGE_MODE === "legacy";
 const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
 const serialize = (subjects: Subject[], attempts: Attempt[]) =>
   JSON.stringify({ subjects, attempts });
@@ -72,7 +81,12 @@ export function useStudySync() {
   );
   const [syncRetry, setSyncRetry] = useState(0);
   const lastSyncedData = useRef("");
+  const lastSyncedSnapshot = useRef<StudySnapshot>({
+    subjects: [],
+    attempts: [],
+  });
   const lastRemoteUpdatedAt = useRef(0);
+  const storageMode = useRef<"relational" | "legacy">("legacy");
   const subjectsRef = useRef<Subject[]>([]);
   const attemptsRef = useRef<Attempt[]>([]);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
@@ -205,87 +219,85 @@ export function useStudySync() {
         cachedSubjects = dedupeSubjects(subjectsRef.current);
         cachedAttempts = attemptsRef.current;
       }
-      const cachedUpdatedAt = Number(
-        localStorage.getItem(userCacheKey(CACHE_UPDATED_KEY, userId)) || 0,
-      );
       const cachedSerialized = serialize(cachedSubjects, cachedAttempts);
-
-      const controller = new AbortController();
-      const timeout = window.setTimeout(() => controller.abort(), 8000);
-      const { data, error } = await supabase!
-        .from("user_data")
-        .select("subjects, attempts, updated_at")
-        .eq("user_id", userId)
-        .abortSignal(controller.signal)
-        .maybeSingle();
-      window.clearTimeout(timeout);
+      const client = supabase!;
+      const [legacy, relational] = await Promise.all([
+        loadLegacyData(client, userId),
+        forceLegacyStorage
+          ? Promise.resolve({
+              available: false,
+              subjects: [],
+              attempts: [],
+              updatedAt: 0,
+            })
+          : loadRelationalData(client, userId),
+      ]);
       if (!active) return;
-      if (error) {
-        setSyncStatus("error");
-        setCloudReady(false);
-        return;
-      }
 
-      const remoteSubjects = dedupeSubjects(
-        data && Array.isArray(data.subjects) ? data.subjects : [],
-      );
-      const remoteAttempts: Attempt[] =
-        data && Array.isArray(data.attempts) ? data.attempts : [];
-      const remoteSerialized = serialize(remoteSubjects, remoteAttempts);
-      const remoteUpdatedAt = data?.updated_at
-        ? Date.parse(String(data.updated_at))
-        : 0;
+      storageMode.current = relational.available ? "relational" : "legacy";
+      let remote: StudySnapshot =
+        relational.available && relational.updatedAt >= legacy.updatedAt
+          ? {
+              subjects: dedupeSubjects(relational.subjects),
+              attempts: relational.attempts,
+            }
+          : {
+              subjects: dedupeSubjects(legacy.subjects),
+              attempts: legacy.attempts,
+            };
+      let remoteUpdatedAt =
+        relational.available && relational.updatedAt >= legacy.updatedAt
+          ? relational.updatedAt
+          : legacy.updatedAt;
       const latestSubjects = dedupeSubjects(subjectsRef.current);
       const latestAttempts = attemptsRef.current;
       const latestSerialized = serialize(latestSubjects, latestAttempts);
       const changedDuringLoad = latestSerialized !== cachedSerialized;
-      const remoteIsEmpty =
-        remoteSubjects.length + remoteAttempts.length === 0;
+      const remoteIsEmpty = remote.subjects.length + remote.attempts.length === 0;
       const cachedHasData =
         cachedSubjects.length + cachedAttempts.length > 0;
-      const cacheDiffersFromRemote = cachedSerialized !== remoteSerialized;
-      const cacheIsNewer =
-        cacheDiffersFromRemote &&
-        ((cachedUpdatedAt > 0 && cachedUpdatedAt > remoteUpdatedAt) ||
-          (cachedUpdatedAt === 0 && cachedHasData && remoteIsEmpty));
-      const shouldUseLocal = !data || changedDuringLoad || cacheIsNewer;
+      const shouldPersistLocal =
+        changedDuringLoad || (remoteIsEmpty && cachedHasData);
 
-      if (shouldUseLocal) {
-        const nextSubjects = changedDuringLoad
-          ? latestSubjects
-          : cachedSubjects;
-        const nextAttempts = changedDuringLoad
-          ? latestAttempts
-          : cachedAttempts;
+      if (shouldPersistLocal) {
+        const next: StudySnapshot = {
+          subjects: changedDuringLoad ? latestSubjects : cachedSubjects,
+          attempts: changedDuringLoad ? latestAttempts : cachedAttempts,
+        };
         const updatedAt = new Date().toISOString();
-        const { error: migrationError } = await supabase!
-          .from("user_data")
-          .upsert({
-            user_id: userId,
-            subjects: nextSubjects,
-            attempts: nextAttempts,
-            updated_at: updatedAt,
-          });
-        if (!active) return;
-        if (migrationError) {
-          setSyncStatus("error");
-          setCloudReady(false);
-          return;
+        if (relational.available) {
+          await saveRelationalChanges(client, remote, next, updatedAt);
+          storageMode.current = "relational";
         }
-        lastSyncedData.current = serialize(nextSubjects, nextAttempts);
-        lastRemoteUpdatedAt.current = Date.parse(updatedAt);
-        subjectsRef.current = nextSubjects;
-        attemptsRef.current = nextAttempts;
-        setSubjects(nextSubjects);
-        setAttempts(nextAttempts);
-      } else {
-        lastSyncedData.current = remoteSerialized;
-        lastRemoteUpdatedAt.current = remoteUpdatedAt;
-        subjectsRef.current = remoteSubjects;
-        attemptsRef.current = remoteAttempts;
-        setSubjects(remoteSubjects);
-        setAttempts(remoteAttempts);
+        await saveLegacyBackup(client, userId, next, updatedAt);
+        if (!active) return;
+        remote = next;
+        remoteUpdatedAt = Date.parse(updatedAt);
+      } else if (
+        relational.available &&
+        legacy.updatedAt > relational.updatedAt
+      ) {
+        const migratedAt = new Date(legacy.updatedAt || Date.now()).toISOString();
+        await saveRelationalChanges(
+          client,
+          {
+            subjects: dedupeSubjects(relational.subjects),
+            attempts: relational.attempts,
+          },
+          remote,
+          migratedAt,
+        );
+        storageMode.current = "relational";
       }
+
+      const remoteSerialized = serialize(remote.subjects, remote.attempts);
+      lastSyncedData.current = remoteSerialized;
+      lastSyncedSnapshot.current = remote;
+      lastRemoteUpdatedAt.current = remoteUpdatedAt;
+      subjectsRef.current = remote.subjects;
+      attemptsRef.current = remote.attempts;
+      setSubjects(remote.subjects);
+      setAttempts(remote.attempts);
 
       localStorage.removeItem(SUBJECTS_KEY);
       localStorage.removeItem(ATTEMPTS_KEY);
@@ -309,21 +321,37 @@ export function useStudySync() {
     const serialized = serialize(subjects, attempts);
     if (serialized === lastSyncedData.current) return;
     const client = supabase;
+    const nextSnapshot = { subjects, attempts };
+    const previousSnapshot = lastSyncedSnapshot.current;
     const timer = window.setTimeout(() => {
       setSyncStatus("saving");
       saveQueue.current = saveQueue.current.then(async () => {
         const updatedAt = new Date().toISOString();
-        const { error } = await client.from("user_data").upsert({
-          user_id: sessionUserId,
-          subjects,
-          attempts,
-          updated_at: updatedAt,
-        });
-        if (error) {
+        try {
+          if (storageMode.current === "relational") {
+            try {
+              await saveRelationalChanges(
+                client,
+                previousSnapshot,
+                nextSnapshot,
+                updatedAt,
+              );
+            } catch {
+              storageMode.current = "legacy";
+            }
+          }
+          await saveLegacyBackup(
+            client,
+            sessionUserId,
+            nextSnapshot,
+            updatedAt,
+          );
+        } catch {
           setSyncStatus("error");
           return;
         }
         lastSyncedData.current = serialized;
+        lastSyncedSnapshot.current = nextSnapshot;
         lastRemoteUpdatedAt.current = Date.parse(updatedAt);
         if (
           serialize(subjectsRef.current, attemptsRef.current) === serialized
@@ -341,6 +369,7 @@ export function useStudySync() {
     subjectsRef.current = [];
     attemptsRef.current = [];
     lastSyncedData.current = "";
+    lastSyncedSnapshot.current = { subjects: [], attempts: [] };
     lastRemoteUpdatedAt.current = 0;
     setSubjects([]);
     setAttempts([]);
