@@ -30,6 +30,8 @@ export type EssayGrading = {
 
 export type AnswerRecord = {
   questionId: string;
+  subjectId?: string;
+  subjectName?: string;
   question?: string;
   type?: QType;
   answer: string;
@@ -44,9 +46,17 @@ export type AnswerRecord = {
 export type Attempt = {
   id: string;
   subjectId: string;
+  subjectIds?: string[];
+  subjectNames?: string[];
   date: string;
   score: number;
   total: number;
+  mode?: "study" | "exam";
+  passPercentage?: number;
+  percentage?: number;
+  passed?: boolean;
+  essayPending?: boolean;
+  timeLimitMinutes?: number | null;
   answers: AnswerRecord[];
   status?: "completed" | "interrupted";
 };
