@@ -4,6 +4,7 @@ import { AuthScreen } from "@/components/auth-screen";
 import { useStudySync } from "@/hooks/use-study-sync";
 import {
   blankQuestion,
+  dedupeQuestions,
   loadSheet,
   MAX_CHOICE_OPTIONS,
   MIN_CHOICE_OPTIONS,
@@ -72,9 +73,13 @@ export default function Home() {
       const unique = Array.from(
         new Map(current.map((item) => [item.id, item])).values(),
       );
+      const nextSubject = {
+        ...s,
+        questions: dedupeQuestions(s.questions),
+      };
       return unique.some((item) => item.id === s.id)
-        ? unique.map((item) => (item.id === s.id ? s : item))
-        : [...unique, s];
+        ? unique.map((item) => (item.id === s.id ? nextSubject : item))
+        : [...unique, nextSubject];
     });
   async function signOut() {
     await signOutCloud();
@@ -201,14 +206,19 @@ export default function Home() {
         return alert("正解には、入力した選択肢と同じ文章を設定してください");
       nextQuestion = { ...editing, options, answer };
     }
-    saveSubject({
-      ...subject,
-      questions: subject.questions.some((q) => q.id === nextQuestion.id)
-        ? subject.questions.map((q) =>
-            q.id === nextQuestion.id ? nextQuestion : q,
-          )
-        : [...subject.questions, nextQuestion],
-    });
+    setSubjects((current) =>
+      current.map((item) =>
+        item.id !== subject.id
+          ? item
+          : {
+              ...item,
+              questions: dedupeQuestions([
+                ...item.questions.filter((q) => q.id !== nextQuestion.id),
+                nextQuestion,
+              ]),
+            },
+      ),
+    );
     setEditing(null);
   }
   function openStudySetup() {
