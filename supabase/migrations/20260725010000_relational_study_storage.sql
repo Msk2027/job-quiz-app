@@ -185,7 +185,7 @@ begin
   select
     current_user_id,
     current_subject_id,
-    value->>'id',
+    question_id,
     coalesce(value->>'type', 'choice'),
     coalesce(value->>'question', ''),
     coalesce(value->'options', '[]'::jsonb),
@@ -193,11 +193,18 @@ begin
     coalesce(value->>'explanation', ''),
     coalesce(value->>'modelAnswer', ''),
     coalesce(value->>'rubric', ''),
-    ordinality::integer - 1,
+    position,
     p_updated_at
-  from jsonb_array_elements(coalesce(p_subject->'questions', '[]'::jsonb))
-    with ordinality as questions(value, ordinality)
-  where value->>'id' is not null
+  from (
+    select distinct on (value->>'id')
+      value->>'id' as question_id,
+      value,
+      ordinality::integer - 1 as position
+    from jsonb_array_elements(coalesce(p_subject->'questions', '[]'::jsonb))
+      with ordinality as questions(value, ordinality)
+    where value->>'id' is not null
+    order by value->>'id', ordinality desc
+  ) deduplicated_questions
   on conflict (user_id, subject_id, id) do update set
     question_type = excluded.question_type,
     question = excluded.question,
@@ -369,7 +376,16 @@ grant execute on function public.replace_study_attempt(jsonb, timestamptz)
 grant execute on function public.delete_study_attempt(text, timestamptz)
   to authenticated;
 
-with subject_rows as (
+revoke execute on function public.replace_study_subject(jsonb, timestamptz)
+  from public, anon;
+revoke execute on function public.delete_study_subject(text, timestamptz)
+  from public, anon;
+revoke execute on function public.replace_study_attempt(jsonb, timestamptz)
+  from public, anon;
+revoke execute on function public.delete_study_attempt(text, timestamptz)
+  from public, anon;
+
+with raw_subject_rows as (
   select
     data.user_id,
     subject.value,
@@ -378,6 +394,13 @@ with subject_rows as (
   from public.user_data data
   cross join lateral jsonb_array_elements(data.subjects)
     with ordinality as subject(value, ordinality)
+),
+subject_rows as (
+  select distinct on (user_id, value->>'id')
+    user_id, value, position, updated_at
+  from raw_subject_rows
+  where value->>'id' is not null
+  order by user_id, value->>'id', position desc
 )
 insert into public.study_subjects (
   user_id, id, name, color, source, position, updated_at
@@ -391,7 +414,6 @@ select
   position,
   updated_at
 from subject_rows
-where value->>'id' is not null
 on conflict (user_id, id) do update set
   name = excluded.name,
   color = excluded.color,
@@ -399,7 +421,7 @@ on conflict (user_id, id) do update set
   position = excluded.position,
   updated_at = excluded.updated_at;
 
-with question_rows as (
+with raw_question_rows as (
   select
     data.user_id,
     subject.value->>'id' as subject_id,
@@ -412,6 +434,13 @@ with question_rows as (
   cross join lateral jsonb_array_elements(
     coalesce(subject.value->'questions', '[]'::jsonb)
   ) with ordinality as question(value, ordinality)
+),
+question_rows as (
+  select distinct on (user_id, subject_id, value->>'id')
+    user_id, subject_id, value, position, updated_at
+  from raw_question_rows
+  where subject_id is not null and value->>'id' is not null
+  order by user_id, subject_id, value->>'id', position desc
 )
 insert into public.study_questions (
   user_id, subject_id, id, question_type, question, options, answer,
@@ -431,7 +460,6 @@ select
   position,
   updated_at
 from question_rows
-where subject_id is not null and value->>'id' is not null
 on conflict (user_id, subject_id, id) do update set
   question_type = excluded.question_type,
   question = excluded.question,
@@ -443,7 +471,7 @@ on conflict (user_id, subject_id, id) do update set
   position = excluded.position,
   updated_at = excluded.updated_at;
 
-with attempt_rows as (
+with raw_attempt_rows as (
   select
     data.user_id,
     attempt.value,
@@ -452,6 +480,13 @@ with attempt_rows as (
   from public.user_data data
   cross join lateral jsonb_array_elements(data.attempts)
     with ordinality as attempt(value, ordinality)
+),
+attempt_rows as (
+  select distinct on (user_id, value->>'id')
+    user_id, value, position, updated_at
+  from raw_attempt_rows
+  where value->>'id' is not null
+  order by user_id, value->>'id', position desc
 )
 insert into public.study_attempts (
   user_id, id, subject_id, subject_ids, subject_names, display_date,
@@ -477,7 +512,6 @@ select
   position,
   updated_at
 from attempt_rows
-where value->>'id' is not null
 on conflict (user_id, id) do update set
   subject_id = excluded.subject_id,
   subject_ids = excluded.subject_ids,
@@ -495,18 +529,26 @@ on conflict (user_id, id) do update set
   position = excluded.position,
   updated_at = excluded.updated_at;
 
-with answer_rows as (
+with raw_answer_rows as (
   select
     data.user_id,
     attempt.value->>'id' as attempt_id,
+    attempt.ordinality as attempt_ordinality,
     answer.value,
     answer.ordinality::integer - 1 as answer_index
   from public.user_data data
   cross join lateral jsonb_array_elements(data.attempts)
-    as attempt(value)
+    with ordinality as attempt(value, ordinality)
   cross join lateral jsonb_array_elements(
     coalesce(attempt.value->'answers', '[]'::jsonb)
   ) with ordinality as answer(value, ordinality)
+),
+answer_rows as (
+  select distinct on (user_id, attempt_id, answer_index)
+    user_id, attempt_id, value, answer_index
+  from raw_answer_rows
+  where attempt_id is not null
+  order by user_id, attempt_id, answer_index, attempt_ordinality desc
 )
 insert into public.study_answers (
   user_id, attempt_id, answer_index, question_id, subject_id, subject_name,
@@ -530,7 +572,6 @@ select
   value->>'rubric',
   value->'grading'
 from answer_rows
-where attempt_id is not null
 on conflict (user_id, attempt_id, answer_index) do update set
   question_id = excluded.question_id,
   subject_id = excluded.subject_id,
@@ -550,6 +591,6 @@ select user_id, updated_at
 from public.user_data
 on conflict (user_id) do update
   set updated_at = greatest(
-    public.study_storage_state.updated_at,
+    study_storage_state.updated_at,
     excluded.updated_at
   );
