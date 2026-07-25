@@ -1,8 +1,9 @@
 "use client";
 import { useMemo, useRef, useState } from "react";
+import { AnswerBreakdown, AnswerReviewList } from "@/components/answer-review";
 import { AuthScreen } from "@/components/auth-screen";
 import { useStudySync } from "@/hooks/use-study-sync";
-import { scoreExam, shuffle } from "@/lib/exam";
+import { scoreExam, shuffle, summarizeAnswers } from "@/lib/exam";
 import {
   blankQuestion,
   dedupeQuestions,
@@ -81,6 +82,7 @@ export default function Home() {
   const [subjectSettings, setSubjectSettings] = useState<Subject | null>(null),
     [settingsLoading, setSettingsLoading] = useState(false);
   const [expandedAttempt, setExpandedAttempt] = useState<string | null>(null);
+  const [expandedExam, setExpandedExam] = useState<string | null>(null);
   const [showStudySetup, setShowStudySetup] = useState(false),
     [studyTypes, setStudyTypes] = useState<QType[]>([
       "choice",
@@ -778,7 +780,7 @@ export default function Home() {
                     </p>
                     <h2 className="mt-1 text-2xl font-black">試験モード</h2>
                     <p className="mt-2 text-sm text-blue-100">
-                      途中では正誤を表示せず、終了後にまとめて判定します
+                      途中では正誤を表示せず、終了後に合否と間違えた問題をまとめて確認できます
                     </p>
                   </div>
                   <button
@@ -834,72 +836,103 @@ export default function Home() {
                   <h3 className="font-black">最近の試験結果</h3>
                   <div className="mt-3 space-y-2">
                     {examAttempts.slice(0, 5).map((attempt) => (
-                      <div
-                        key={attempt.id}
-                        className="flex flex-wrap items-center justify-between gap-3 rounded-xl border p-3"
-                      >
-                        <div>
-                          <p className="font-bold">
-                            {attempt.subjectNames?.join("・") || "試験モード"}
-                          </p>
-                          <p className="mt-1 text-xs text-gray-500">
-                            {attempt.date}・{attempt.answers.length}問・合格基準
-                            {attempt.passPercentage ?? 90}%
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-3">
-                          <span
-                            className={`font-black ${
-                              attempt.status === "interrupted"
-                                ? "text-gray-500"
+                      <div key={attempt.id} className="rounded-xl border">
+                        <div className="flex flex-wrap items-center justify-between gap-3 p-3">
+                          <div>
+                            <p className="font-bold">
+                              {attempt.subjectNames?.join("・") || "試験モード"}
+                            </p>
+                            <p className="mt-1 text-xs text-gray-500">
+                              {attempt.date}・{attempt.answers.length}
+                              問・合格基準
+                              {attempt.passPercentage ?? 90}%・不正解
+                              {summarizeAnswers(attempt.answers).incorrect}問
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span
+                              className={`font-black ${
+                                attempt.status === "interrupted"
+                                  ? "text-gray-500"
+                                  : attempt.essayPending
+                                    ? "text-amber-600"
+                                    : attempt.passed
+                                      ? "text-green-600"
+                                      : "text-red-600"
+                              }`}
+                            >
+                              {attempt.status === "interrupted"
+                                ? "途中中断"
                                 : attempt.essayPending
-                                  ? "text-amber-600"
+                                  ? "採点待ち"
                                   : attempt.passed
-                                    ? "text-green-600"
-                                    : "text-red-600"
-                            }`}
-                          >
-                            {attempt.status === "interrupted"
-                              ? "途中中断"
-                              : attempt.essayPending
-                                ? "採点待ち"
-                                : attempt.passed
-                                  ? `合格 ${attempt.percentage}%`
-                                  : `不合格 ${attempt.percentage}%`}
-                          </span>
-                          {attempt.answers.some(
-                            (answer) => answer.type === "essay",
-                          ) && (
-                            <>
-                              <button
-                                onClick={() => exportEssayText(attempt.id)}
-                                className="text-sm font-bold text-blue-700"
-                              >
-                                答案出力
-                              </button>
-                              <label className="cursor-pointer text-sm font-bold text-blue-700">
-                                採点取込
-                                <input
-                                  type="file"
-                                  accept=".xlsx"
-                                  className="hidden"
-                                  onChange={(event) => {
-                                    const file = event.target.files?.[0];
-                                    if (file)
-                                      importEssayGrades(file, attempt.id);
-                                    event.target.value = "";
-                                  }}
-                                />
-                              </label>
-                            </>
-                          )}
-                          <button
-                            onClick={() => deleteAttempt(attempt)}
-                            className="text-sm font-bold text-red-500"
-                          >
-                            削除
-                          </button>
+                                    ? `合格 ${attempt.percentage}%`
+                                    : `不合格 ${attempt.percentage}%`}
+                            </span>
+                            {attempt.answers.some(
+                              (answer) => answer.type === "essay",
+                            ) && (
+                              <>
+                                <button
+                                  onClick={() => exportEssayText(attempt.id)}
+                                  className="text-sm font-bold text-blue-700"
+                                >
+                                  答案出力
+                                </button>
+                                <label className="cursor-pointer text-sm font-bold text-blue-700">
+                                  採点取込
+                                  <input
+                                    type="file"
+                                    accept=".xlsx"
+                                    className="hidden"
+                                    onChange={(event) => {
+                                      const file = event.target.files?.[0];
+                                      if (file)
+                                        importEssayGrades(file, attempt.id);
+                                      event.target.value = "";
+                                    }}
+                                  />
+                                </label>
+                              </>
+                            )}
+                            <button
+                              onClick={() =>
+                                setExpandedExam(
+                                  expandedExam === attempt.id
+                                    ? null
+                                    : attempt.id,
+                                )
+                              }
+                              className="rounded-lg border border-blue-600 px-3 py-1 text-sm font-bold text-blue-700"
+                            >
+                              {expandedExam === attempt.id
+                                ? "閉じる ▲"
+                                : "結果を見る ▼"}
+                            </button>
+                            <button
+                              onClick={() => deleteAttempt(attempt)}
+                              className="text-sm font-bold text-red-500"
+                            >
+                              削除
+                            </button>
+                          </div>
                         </div>
+                        {expandedExam === attempt.id && (
+                          <div className="border-t p-4">
+                            <AnswerBreakdown answers={attempt.answers} />
+                            <div className="mt-6 border-t pt-5">
+                              <h4 className="mb-3 font-black">
+                                問題ごとの結果
+                              </h4>
+                              <AnswerReviewList
+                                answers={attempt.answers}
+                                subjects={subjects}
+                                fallbackSubjectId={attempt.subjectId}
+                                showSubject
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -1034,109 +1067,11 @@ export default function Home() {
                         </button>
                         {expandedAttempt === a.id && (
                           <div className="p-4 space-y-4">
-                            {(a.answers || []).map((record, i) => {
-                              const current = subject.questions.find(
-                                (q) => q.id === record.questionId,
-                              );
-                              const qText =
-                                record.question ||
-                                current?.question ||
-                                "過去の問題";
-                              const qType = record.type || current?.type;
-                              const correctAnswer =
-                                record.correctAnswer || current?.answer || "";
-                              const contentChanged = !!(
-                                current &&
-                                record.question &&
-                                (record.question !== current.question ||
-                                  record.type !== current.type ||
-                                  record.correctAnswer !== current.answer ||
-                                  (record.explanation || "") !==
-                                    current.explanation ||
-                                  (record.modelAnswer || "") !==
-                                    current.modelAnswer ||
-                                  (record.rubric || "") !== current.rubric)
-                              );
-                              return (
-                                <div
-                                  key={`${record.questionId}-${i}`}
-                                  className="border-b last:border-0 pb-4 last:pb-0"
-                                >
-                                  <div className="flex justify-between gap-3">
-                                    <p className="font-bold">
-                                      Q{i + 1}. {qText}
-                                    </p>
-                                    <span
-                                      className={`text-sm font-bold whitespace-nowrap ${record.correct === true ? "text-green-600" : record.correct === false ? "text-red-600" : "text-blue-600"}`}
-                                    >
-                                      {record.correct === true
-                                        ? "正解"
-                                        : record.correct === false
-                                          ? "不正解"
-                                          : record.grading
-                                            ? `${record.grading.score}点`
-                                            : "未採点"}
-                                    </span>
-                                  </div>
-                                  {contentChanged && (
-                                    <p className="mt-2 text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
-                                      この問題は回答後に内容が変更されています。表示中の履歴は回答当時の内容です。
-                                    </p>
-                                  )}
-                                  <p className="mt-2 text-sm">
-                                    <b>あなたの回答：</b>
-                                    {record.answer || "（未入力）"}
-                                  </p>
-                                  {qType !== "essay" && correctAnswer && (
-                                    <p className="text-sm text-green-700">
-                                      <b>正解：</b>
-                                      {correctAnswer}
-                                    </p>
-                                  )}
-                                  {(record.explanation ||
-                                    current?.explanation) && (
-                                    <p className="text-sm text-gray-600 mt-1">
-                                      <b>解説：</b>
-                                      {record.explanation ||
-                                        current?.explanation}
-                                    </p>
-                                  )}
-                                  {qType === "essay" && (
-                                    <div className="mt-2 text-sm bg-blue-50 p-3 rounded-lg">
-                                      {record.grading ? (
-                                        <div className="space-y-2">
-                                          <p className="text-lg font-black text-blue-700">
-                                            AI採点：{record.grading.score}点
-                                          </p>
-                                          <p>
-                                            <b>総合評価：</b>
-                                            {record.grading.assessment}
-                                          </p>
-                                          <p>
-                                            <b>良かった点：</b>
-                                            {record.grading.goodPoints}
-                                          </p>
-                                          <p>
-                                            <b>不足している点：</b>
-                                            {record.grading.missingPoints}
-                                          </p>
-                                          <p>
-                                            <b>改善した答案例：</b>
-                                            {record.grading.improvedAnswer}
-                                          </p>
-                                          <p className="text-xs text-gray-500">
-                                            取込日時：
-                                            {record.grading.importedAt}
-                                          </p>
-                                        </div>
-                                      ) : (
-                                        "サイト内では採点しません。テキスト出力後、AIに採点させ、結果のExcelを取り込んでください。"
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
+                            <AnswerReviewList
+                              answers={a.answers || []}
+                              subjects={subjects}
+                              fallbackSubjectId={a.subjectId}
+                            />
                             {a.answers.some(
                               (answer) => answer.type === "essay",
                             ) && (
@@ -1287,9 +1222,7 @@ export default function Home() {
                       />
                       <button
                         type="button"
-                        disabled={
-                          editing.options.length <= MIN_CHOICE_OPTIONS
-                        }
+                        disabled={editing.options.length <= MIN_CHOICE_OPTIONS}
                         onClick={() => {
                           const removed = editing.options[index];
                           const options = editing.options.filter(
@@ -1635,7 +1568,7 @@ export default function Home() {
                 <span>
                   <b className="block text-blue-800">試験モードで実施する</b>
                   <span className="mt-1 block text-sm text-blue-700">
-                    途中では正誤・解説を表示せず、終了後にまとめて合否を判定します
+                    途中では正誤・解説を表示せず、終了後に合否と間違えた問題をまとめて確認できます
                   </span>
                 </span>
               </label>
@@ -1715,7 +1648,10 @@ export default function Home() {
                           : "border-gray-200")
                       }
                     >
-                      <b>{checked ? "✓ " : ""}{item.name}</b>
+                      <b>
+                        {checked ? "✓ " : ""}
+                        {item.name}
+                      </b>
                       <span className="mt-1 block text-sm">
                         {item.questions.length}問
                       </span>
@@ -1922,91 +1858,114 @@ export default function Home() {
           </div>
         )}
         {view === "result" && lastAttempt && (
-          <div className="card max-w-xl mx-auto text-center p-10">
-            <h1 className="text-3xl font-black">
-              {resultSaving
-                ? "結果を保存しています…"
-                : resultSaveError
-                  ? "結果を保存できませんでした"
-                  : lastInterrupted
-                ? "途中結果を保存しました"
-                : lastAttempt.mode === "exam"
-                  ? lastAttempt.essayPending
-                    ? "論述採点待ち"
-                    : lastAttempt.passed
-                      ? "合格"
-                      : "不合格"
-                  : "学習完了"}
-            </h1>
-            {resultSaving && (
-              <div className="mx-auto mt-5 h-9 w-9 animate-spin rounded-full border-4 border-blue-100 border-t-blue-600" />
-            )}
-            {resultSaveError && (
-              <div className="mt-5 rounded-xl bg-red-50 p-4 text-sm text-red-700">
-                <p>
-                  回答はこの端末に残っています。通信を確認して、もう一度保存してください。
+          <div className="mx-auto max-w-3xl space-y-4">
+            <div className="card text-center p-8 md:p-10">
+              <h1 className="text-3xl font-black">
+                {resultSaving
+                  ? "結果を保存しています…"
+                  : resultSaveError
+                    ? "結果を保存できませんでした"
+                    : lastInterrupted
+                      ? "途中結果を保存しました"
+                      : lastAttempt.mode === "exam"
+                        ? lastAttempt.essayPending
+                          ? "論述採点待ち"
+                          : lastAttempt.passed
+                            ? "合格"
+                            : "不合格"
+                        : "学習完了"}
+              </h1>
+              {resultSaving && (
+                <div className="mx-auto mt-5 h-9 w-9 animate-spin rounded-full border-4 border-blue-100 border-t-blue-600" />
+              )}
+              {resultSaveError && (
+                <div className="mt-5 rounded-xl bg-red-50 p-4 text-sm text-red-700">
+                  <p>
+                    回答はこの端末に残っています。通信を確認して、もう一度保存してください。
+                  </p>
+                  <button
+                    onClick={retryResultSave}
+                    className="mt-3 rounded-lg bg-red-600 px-5 py-2 font-bold text-white"
+                  >
+                    保存を再試行
+                  </button>
+                </div>
+              )}
+              {lastAttempt.mode === "exam" ? (
+                <>
+                  <p className="mt-3 text-gray-500">
+                    {lastAttempt.subjectNames?.join("・") ||
+                      subjects.find((item) => item.id === lastAttempt.subjectId)
+                        ?.name}
+                  </p>
+                  <div className="mt-6 rounded-2xl bg-gray-50 p-6">
+                    <p className="text-sm text-gray-500">
+                      {lastAttempt.essayPending
+                        ? "自動採点できる問題の暫定結果"
+                        : "最終得点率"}
+                    </p>
+                    <p className="mt-1 text-4xl font-black text-blue-700">
+                      {lastAttempt.percentage ?? 0}%
+                    </p>
+                    <p className="mt-2 text-sm text-gray-500">
+                      合格基準 {lastAttempt.passPercentage ?? 90}%・択一等{" "}
+                      {lastAttempt.score}/{lastAttempt.total}・不正解{" "}
+                      {summarizeAnswers(lastAttempt.answers).incorrect}問
+                    </p>
+                  </div>
+                  {lastAttempt.essayPending && (
+                    <p className="mt-4 text-sm text-amber-700">
+                      論述答案をAIで採点し、Excelを取り込むと最終合否が確定します。
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="text-gray-500 mt-2">
+                  論述問題はテキストにまとめてAIで採点できます
                 </p>
+              )}
+              <div className="flex flex-col gap-3 mt-8">
+                {lastAttempt.answers.some(
+                  (answer) => answer.type === "essay",
+                ) && (
+                  <button
+                    onClick={() => exportEssayText(lastAttempt.id)}
+                    disabled={resultSaving}
+                    className="bg-blue-600 text-white py-3 rounded-xl font-bold"
+                  >
+                    論述答案をテキスト出力
+                  </button>
+                )}
                 <button
-                  onClick={retryResultSave}
-                  className="mt-3 rounded-lg bg-red-600 px-5 py-2 font-bold text-white"
+                  onClick={() =>
+                    setView(lastAttempt.mode === "exam" ? "home" : "subject")
+                  }
+                  disabled={resultSaving}
+                  className="border py-3 rounded-xl font-bold disabled:opacity-50"
                 >
-                  保存を再試行
+                  {lastAttempt.mode === "exam"
+                    ? "メイン画面へ戻る"
+                    : "科目へ戻る"}
                 </button>
               </div>
-            )}
-            {lastAttempt.mode === "exam" ? (
-              <>
-                <p className="mt-3 text-gray-500">
-                  {lastAttempt.subjectNames?.join("・")}
-                </p>
-                <div className="mt-6 rounded-2xl bg-gray-50 p-6">
-                  <p className="text-sm text-gray-500">
-                    {lastAttempt.essayPending
-                      ? "自動採点できる問題の暫定結果"
-                      : "最終得点率"}
-                  </p>
-                  <p className="mt-1 text-4xl font-black text-blue-700">
-                    {lastAttempt.percentage ?? 0}%
-                  </p>
-                  <p className="mt-2 text-sm text-gray-500">
-                    合格基準 {lastAttempt.passPercentage ?? 90}%・択一等{" "}
-                    {lastAttempt.score}/{lastAttempt.total}
-                  </p>
-                </div>
-                {lastAttempt.essayPending && (
-                  <p className="mt-4 text-sm text-amber-700">
-                    論述答案をAIで採点し、Excelを取り込むと最終合否が確定します。
-                  </p>
-                )}
-              </>
-            ) : (
-              <p className="text-gray-500 mt-2">
-                論述問題はテキストにまとめてAIで採点できます
+            </div>
+            <div className="card p-6 md:p-8">
+              <h2 className="text-xl font-black">解答の振り返り</h2>
+              <p className="mt-1 text-sm text-gray-500">
+                間違えた問題と正解・解説をここで確認できます。
               </p>
-            )}
-            <div className="flex flex-col gap-3 mt-8">
-              {lastAttempt.answers.some(
-                (answer) => answer.type === "essay",
-              ) && (
-                <button
-                  onClick={() => exportEssayText(lastAttempt.id)}
-                  disabled={resultSaving}
-                  className="bg-blue-600 text-white py-3 rounded-xl font-bold"
-                >
-                  論述答案をテキスト出力
-                </button>
-              )}
-              <button
-                onClick={() =>
-                  setView(lastAttempt.mode === "exam" ? "home" : "subject")
-                }
-                disabled={resultSaving}
-                className="border py-3 rounded-xl font-bold disabled:opacity-50"
-              >
-                {lastAttempt.mode === "exam"
-                  ? "メイン画面へ戻る"
-                  : "科目へ戻る"}
-              </button>
+              <div className="mt-5">
+                <AnswerBreakdown answers={lastAttempt.answers} />
+              </div>
+              <div className="mt-6 border-t pt-5">
+                <h3 className="mb-3 font-black">問題ごとの結果</h3>
+                <AnswerReviewList
+                  answers={lastAttempt.answers}
+                  subjects={subjects}
+                  fallbackSubjectId={lastAttempt.subjectId}
+                  showSubject={lastAttempt.mode === "exam"}
+                />
+              </div>
             </div>
           </div>
         )}
