@@ -24,8 +24,11 @@ const SUBJECTS_KEY = "study_subjects_v2";
 const ATTEMPTS_KEY = "study_attempts_v2";
 const CACHE_UPDATED_KEY = "study_cache_updated_v2";
 const CACHE_DIRTY_KEY = "study_cache_dirty_v2";
+// Keep the normalized tables intact for a future migration, but use the
+// full-snapshot backup as the default source of truth until relational
+// persistence has been proven lossless in production.
 const forceLegacyStorage =
-  process.env.NEXT_PUBLIC_STUDY_STORAGE_MODE === "legacy";
+  process.env.NEXT_PUBLIC_STUDY_STORAGE_MODE !== "relational";
 const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
 const canonicalize = (value: unknown): unknown => {
   if (Array.isArray(value)) return value.map(canonicalize);
