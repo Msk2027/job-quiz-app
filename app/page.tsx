@@ -59,6 +59,9 @@ export default function Home() {
     session,
     authChecked,
     syncStatus,
+    syncProgress,
+    lastSyncedAt,
+    syncError,
     saveNow,
     retrySync,
     signOut: signOutCloud,
@@ -217,9 +220,11 @@ export default function Home() {
           setSelected(s.id);
           setView("subject");
           setPendingImport(null);
-        } catch {
+        } catch (error) {
           alert(
-            "問題を作成・保存できませんでした。通信状態と公開CSV URLを確認してください。",
+            error instanceof Error
+              ? error.message
+              : "問題を作成・保存できませんでした。通信状態と公開CSV URLを確認してください。",
           );
         }
       },
@@ -233,8 +238,12 @@ export default function Home() {
       const questions = await loadSheet(subjectSettings.source.url);
       setSubjectSettings({ ...subjectSettings, questions });
       alert(`${questions.length}問を読み込みました`);
-    } catch {
-      alert("シートを読み込めませんでした。公開CSV URLを確認してください。");
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "シートを読み込めませんでした。公開CSV URLを確認してください。",
+      );
     } finally {
       setSettingsLoading(false);
     }
@@ -249,9 +258,13 @@ export default function Home() {
           ...subjectSettings,
           questions: await loadSheet(subjectSettings.source.url),
         };
-      } catch {
+      } catch (error) {
         setSettingsLoading(false);
-        return alert("CSVを読み込めませんでした。URLを確認してください。");
+        return alert(
+          error instanceof Error
+            ? error.message
+            : "CSVを読み込めませんでした。URLを確認してください。",
+        );
       }
       setSettingsLoading(false);
     } else {
@@ -269,8 +282,14 @@ export default function Home() {
         try {
           next = { ...s, questions: await loadSheet(s.source.url) };
           saveSubject(next);
-        } catch {
-          alert("同期に失敗したため、保存済みデータを表示します");
+        } catch (error) {
+          const reason =
+            error instanceof Error
+              ? `\n理由: ${error.message}`
+              : "";
+          alert(
+            `同期に失敗したため、保存済みデータを表示します。${reason}`,
+          );
         }
       }
       setSelected(s.id);
@@ -708,22 +727,46 @@ export default function Home() {
           </button>
           <div className="flex items-center gap-3 text-right">
             <div>
-              {syncStatus === "error" ? (
-                <button
-                  onClick={retrySync}
-                  className="text-xs font-bold text-amber-300"
-                >
-                  同期エラー・再試行
-                </button>
-              ) : (
-                <p className="text-xs text-blue-200">
-                  {syncStatus === "saved"
-                    ? "クラウドに保存済み"
+              <button
+                onClick={retrySync}
+                disabled={
+                  !session ||
+                  syncStatus === "loading" ||
+                  syncStatus === "saving"
+                }
+                className={`text-xs font-bold disabled:cursor-wait ${
+                  syncStatus === "error"
+                    ? "text-amber-300"
+                    : "text-blue-200"
+                }`}
+                title="Supabaseの科目・問題・結果を今すぐ同期"
+              >
+                {syncStatus === "error"
+                  ? "同期エラー・再試行"
+                  : syncStatus === "saved"
+                    ? "クラウドに保存済み・今すぐ同期"
                     : syncStatus === "saving"
-                      ? "保存中…"
+                      ? `保存中… ${syncProgress}%`
                       : syncStatus === "loading"
-                        ? "同期中…"
+                        ? `同期中… ${syncProgress}%`
                         : "端末内に保存"}
+              </button>
+              {lastSyncedAt && syncStatus !== "loading" && (
+                <p className="text-[10px] text-white/60">
+                  最終同期{" "}
+                  {new Date(lastSyncedAt).toLocaleTimeString("ja-JP", {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  })}
+                </p>
+              )}
+              {syncError && (
+                <p
+                  className="max-w-52 truncate text-[10px] text-amber-200"
+                  title={syncError}
+                >
+                  {syncError}
                 </p>
               )}
               {session?.user.email && (

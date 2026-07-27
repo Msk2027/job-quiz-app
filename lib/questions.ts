@@ -67,18 +67,33 @@ function rowToQuestion(row: Record<string, string>): Question | null {
 
 export async function loadSheet(url: string) {
   const { default: Papa } = await import("papaparse");
-  return new Promise<Question[]>((resolve, reject) =>
-    Papa.parse<Record<string, string>>(url, {
-      download: true,
-      header: true,
-      skipEmptyLines: true,
-      complete: ({ data }) =>
-        resolve(
-          dedupeQuestions(
-            data.map(rowToQuestion).filter((q): q is Question => !!q),
-          ),
-        ),
-      error: reject,
-    }),
+  const response = await fetch(`/api/sheet?url=${encodeURIComponent(url)}`, {
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new Error(body?.error || "スプレッドシートを取得できませんでした。");
+  }
+
+  const csv = await response.text();
+  const parsed = Papa.parse<Record<string, string>>(csv, {
+    header: true,
+    skipEmptyLines: true,
+  });
+  const fatalError = parsed.errors.find(
+    (error) => error.code !== "TooFewFields" && error.code !== "TooManyFields",
   );
+  if (fatalError)
+    throw new Error(`CSVを解析できませんでした（${fatalError.message}）。`);
+
+  const questions = dedupeQuestions(
+    parsed.data.map(rowToQuestion).filter((q): q is Question => !!q),
+  );
+  if (!questions.length)
+    throw new Error(
+      "問題を読み込めませんでした。CSVの「question」または「問題文」列を確認してください。",
+    );
+  return questions;
 }

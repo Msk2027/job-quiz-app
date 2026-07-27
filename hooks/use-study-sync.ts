@@ -84,6 +84,11 @@ export function useStudySync() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>(
     isSupabaseConfigured ? "loading" : "offline",
   );
+  const [syncProgress, setSyncProgress] = useState(
+    isSupabaseConfigured ? 0 : 100,
+  );
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
   const [syncRetry, setSyncRetry] = useState(0);
   const lastSyncedData = useRef("");
   const lastSyncedSnapshot = useRef<StudySnapshot>({
@@ -195,6 +200,7 @@ export function useStudySync() {
     const userId = sessionUserId;
 
     async function loadCloudData() {
+      setSyncProgress(10);
       const firstLoadForUser = cacheLoadedForUser.current !== userId;
       let cachedSubjects: Subject[];
       let cachedAttempts: Attempt[];
@@ -232,6 +238,7 @@ export function useStudySync() {
       const hasUnsyncedCache =
         localStorage.getItem(userCacheKey(CACHE_DIRTY_KEY, userId)) === "1";
       const client = supabase!;
+      setSyncProgress(25);
       const [legacy, relational] = await Promise.all([
         loadLegacyData(client, userId),
         forceLegacyStorage
@@ -244,6 +251,7 @@ export function useStudySync() {
           : loadRelationalData(client, userId),
       ]);
       if (!active) return;
+      setSyncProgress(65);
 
       storageMode.current = relational.available ? "relational" : "legacy";
       let remote: StudySnapshot =
@@ -273,6 +281,7 @@ export function useStudySync() {
         (remoteIsEmpty && cachedHasData);
 
       if (shouldPersistLocal) {
+        setSyncProgress(75);
         const next: StudySnapshot = {
           subjects: changedDuringLoad ? latestSubjects : cachedSubjects,
           attempts: changedDuringLoad ? latestAttempts : cachedAttempts,
@@ -315,12 +324,20 @@ export function useStudySync() {
 
       localStorage.removeItem(SUBJECTS_KEY);
       localStorage.removeItem(ATTEMPTS_KEY);
+      setSyncProgress(100);
+      setLastSyncedAt(remoteUpdatedAt || Date.now());
+      setSyncError(null);
       setSyncStatus("saved");
       setCloudReady(true);
     }
 
-    loadCloudData().catch(() => {
+    loadCloudData().catch((error) => {
       if (active) {
+        setSyncError(
+          error instanceof Error
+            ? error.message
+            : "クラウドデータを取得できませんでした",
+        );
         setSyncStatus("error");
         setCloudReady(false);
       }
@@ -340,6 +357,8 @@ export function useStudySync() {
         nextSnapshot.attempts,
       );
       setSyncStatus("saving");
+      setSyncProgress(10);
+      setSyncError(null);
       const operation = saveQueue.current.then(async () => {
         const updatedAt = new Date().toISOString();
         const previousSnapshot = lastSyncedSnapshot.current;
@@ -352,6 +371,7 @@ export function useStudySync() {
                 nextSnapshot,
                 updatedAt,
               );
+              setSyncProgress(65);
             } catch {
               storageMode.current = "legacy";
             }
@@ -362,17 +382,25 @@ export function useStudySync() {
             nextSnapshot,
             updatedAt,
           );
+          setSyncProgress(90);
         } catch (error) {
+          setSyncError(
+            error instanceof Error
+              ? error.message
+              : "クラウドへ保存できませんでした",
+          );
           setSyncStatus("error");
           throw error;
         }
         lastSyncedData.current = serialized;
         lastSyncedSnapshot.current = nextSnapshot;
         lastRemoteUpdatedAt.current = Date.parse(updatedAt);
+        setLastSyncedAt(Date.parse(updatedAt));
         if (
           serialize(subjectsRef.current, attemptsRef.current) === serialized
         ) {
           clearUserCacheDirty(sessionUserId);
+          setSyncProgress(100);
           setSyncStatus("saved");
         }
       });
@@ -414,11 +442,18 @@ export function useStudySync() {
     lastSyncedData.current = "";
     lastSyncedSnapshot.current = { subjects: [], attempts: [] };
     lastRemoteUpdatedAt.current = 0;
+    setLastSyncedAt(null);
+    setSyncError(null);
+    setSyncProgress(100);
     setSubjects([]);
     setAttempts([]);
   }
 
   function retrySync() {
+    if (!sessionUserId) return;
+    setCloudReady(false);
+    setSyncError(null);
+    setSyncProgress(0);
     setSyncStatus("loading");
     setSyncRetry((value) => value + 1);
   }
@@ -432,6 +467,9 @@ export function useStudySync() {
     session,
     authChecked,
     syncStatus,
+    syncProgress,
+    lastSyncedAt,
+    syncError,
     saveNow,
     retrySync,
     signOut,
