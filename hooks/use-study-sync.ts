@@ -27,8 +27,19 @@ const CACHE_DIRTY_KEY = "study_cache_dirty_v2";
 const forceLegacyStorage =
   process.env.NEXT_PUBLIC_STUDY_STORAGE_MODE === "legacy";
 const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
+const canonicalize = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (value && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, item]) => item !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, item]) => [key, canonicalize(item)]),
+    );
+  return value;
+};
 const serialize = (subjects: Subject[], attempts: Attempt[]) =>
-  JSON.stringify({ subjects, attempts });
+  JSON.stringify(canonicalize({ subjects, attempts }));
 const dedupeSubjects = (subjects: Subject[]) =>
   Array.from(
     new Map(
@@ -254,8 +265,17 @@ export function useStudySync() {
       setSyncProgress(65);
 
       storageMode.current = relational.available ? "relational" : "legacy";
+      // Both stores normally receive the same timestamp. In that case the
+      // legacy snapshot is the authoritative full backup; preferring a
+      // partially written relational snapshot can make a just-saved result
+      // disappear on reload.
+      const useRelational =
+        relational.available &&
+        (relational.updatedAt > legacy.updatedAt ||
+          (legacy.subjects.length + legacy.attempts.length === 0 &&
+            relational.updatedAt >= legacy.updatedAt));
       let remote: StudySnapshot =
-        relational.available && relational.updatedAt >= legacy.updatedAt
+        useRelational
           ? {
               subjects: dedupeSubjects(relational.subjects),
               attempts: relational.attempts,
@@ -264,10 +284,9 @@ export function useStudySync() {
               subjects: dedupeSubjects(legacy.subjects),
               attempts: legacy.attempts,
             };
-      let remoteUpdatedAt =
-        relational.available && relational.updatedAt >= legacy.updatedAt
-          ? relational.updatedAt
-          : legacy.updatedAt;
+      let remoteUpdatedAt = useRelational
+        ? relational.updatedAt
+        : legacy.updatedAt;
       const latestSubjects = dedupeSubjects(subjectsRef.current);
       const latestAttempts = attemptsRef.current;
       const latestSerialized = serialize(latestSubjects, latestAttempts);
@@ -348,7 +367,7 @@ export function useStudySync() {
   }, [ready, sessionUserId, syncRetry]);
 
   const persistSnapshot = useCallback(
-    (nextSnapshot: StudySnapshot) => {
+    (nextSnapshot: StudySnapshot, verify = false) => {
       if (!supabase || !sessionUserId || !cloudReady)
         return Promise.reject(new Error("クラウド同期の準備ができていません"));
       const client = supabase;
@@ -383,6 +402,16 @@ export function useStudySync() {
             updatedAt,
           );
           setSyncProgress(90);
+          if (verify) {
+            const saved = await loadLegacyData(client, sessionUserId);
+            if (
+              serialize(saved.subjects, saved.attempts) !==
+              serialize(nextSnapshot.subjects, nextSnapshot.attempts)
+            )
+              throw new Error(
+                "クラウドへの保存内容を確認できませんでした。端末データは保持しています。",
+              );
+          }
         } catch (error) {
           setSyncError(
             error instanceof Error
@@ -429,6 +458,7 @@ export function useStudySync() {
           subjects: subjectsRef.current,
           attempts: attemptsRef.current,
         },
+        true,
       ),
     [persistSnapshot],
   );
