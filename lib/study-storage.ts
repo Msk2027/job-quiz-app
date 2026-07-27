@@ -16,6 +16,7 @@ export type StudySnapshot = {
 type StorageResult = StudySnapshot & {
   available: boolean;
   updatedAt: number;
+  error?: string;
 };
 
 type SubjectRow = {
@@ -82,18 +83,30 @@ export async function loadLegacyData(
   client: SupabaseClient,
   userId: string,
 ): Promise<StorageResult> {
-  const { data, error } = await client
-    .from("user_data")
-    .select("subjects, attempts, updated_at")
-    .eq("user_id", userId)
-    .maybeSingle();
-  throwIfError(error);
-  return {
-    available: true,
-    subjects: data && Array.isArray(data.subjects) ? data.subjects : [],
-    attempts: data && Array.isArray(data.attempts) ? data.attempts : [],
-    updatedAt: data?.updated_at ? Date.parse(String(data.updated_at)) : 0,
-  };
+  try {
+    const { data, error } = await client
+      .from("user_data")
+      .select("subjects, attempts, updated_at")
+      .eq("user_id", userId)
+      .maybeSingle();
+    throwIfError(error);
+    return {
+      available: true,
+      subjects: data && Array.isArray(data.subjects) ? data.subjects : [],
+      attempts: data && Array.isArray(data.attempts) ? data.attempts : [],
+      updatedAt: data?.updated_at ? Date.parse(String(data.updated_at)) : 0,
+    };
+  } catch (error) {
+    // 読み込みに失敗したときに「クラウドは空」と扱うと端末のデータを
+    // 空で上書きしてしまうため、利用不可であることを呼び出し側へ伝える。
+    return {
+      available: false,
+      subjects: [],
+      attempts: [],
+      updatedAt: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 export async function loadRelationalData(
@@ -225,8 +238,14 @@ export async function loadRelationalData(
         ? Date.parse(String(stateResult.data.updated_at))
         : 0,
     };
-  } catch {
-    return { available: false, subjects: [], attempts: [], updatedAt: 0 };
+  } catch (error) {
+    return {
+      available: false,
+      subjects: [],
+      attempts: [],
+      updatedAt: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
   }
 }
 
@@ -248,11 +267,11 @@ export async function saveRelationalChanges(
   const nextSubjects = indexed(next.subjects);
   const previousAttempts = indexed(previous.attempts);
   const nextAttempts = indexed(next.attempts);
-  const operations: PromiseLike<unknown>[] = [];
+  const operations: (() => PromiseLike<unknown>)[] = [];
 
   previousSubjects.forEach((_, id) => {
     if (!nextSubjects.has(id))
-      operations.push(
+      operations.push(() =>
         client.rpc("delete_study_subject", {
           p_subject_id: id,
           p_updated_at: updatedAt,
@@ -262,7 +281,7 @@ export async function saveRelationalChanges(
   nextSubjects.forEach((entry, id) => {
     if (previousSubjects.get(id)?.serialized !== entry.serialized) {
       const position = next.subjects.findIndex((subject) => subject.id === id);
-      operations.push(
+      operations.push(() =>
         client.rpc("replace_study_subject", {
           p_subject: { ...entry.value, position },
           p_updated_at: updatedAt,
@@ -273,7 +292,7 @@ export async function saveRelationalChanges(
 
   previousAttempts.forEach((_, id) => {
     if (!nextAttempts.has(id))
-      operations.push(
+      operations.push(() =>
         client.rpc("delete_study_attempt", {
           p_attempt_id: id,
           p_updated_at: updatedAt,
@@ -283,7 +302,7 @@ export async function saveRelationalChanges(
   nextAttempts.forEach((entry, id) => {
     if (previousAttempts.get(id)?.serialized !== entry.serialized) {
       const position = next.attempts.findIndex((attempt) => attempt.id === id);
-      operations.push(
+      operations.push(() =>
         client.rpc("replace_study_attempt", {
           p_attempt: { ...entry.value, position },
           p_updated_at: updatedAt,
@@ -292,15 +311,19 @@ export async function saveRelationalChanges(
     }
   });
 
-  const results = await Promise.all(operations);
-  const failed = results.find(
-    (result) =>
-      typeof result === "object" &&
-      result !== null &&
-      "error" in result &&
-      result.error,
-  ) as { error?: { message: string } } | undefined;
-  if (failed?.error) throw new Error(failed.error.message);
+  // 同時実行すると各RPCが同じstudy_storage_stateを奪い合い、一部だけ失敗して
+  // 「更新時刻は新しいのに中身が欠けている」状態になる。順番に実行する。
+  let firstError: string | null = null;
+  for (const operation of operations) {
+    try {
+      const result = (await operation()) as { error?: { message: string } };
+      if (result?.error && !firstError) firstError = result.error.message;
+    } catch (error) {
+      if (!firstError)
+        firstError = error instanceof Error ? error.message : String(error);
+    }
+  }
+  if (firstError) throw new Error(firstError);
 }
 
 export async function saveLegacyBackup(

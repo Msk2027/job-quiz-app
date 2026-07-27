@@ -2,6 +2,7 @@
 import { useMemo, useRef, useState } from "react";
 import { AnswerBreakdown, AnswerReviewList } from "@/components/answer-review";
 import { AuthScreen } from "@/components/auth-screen";
+import { DataHealth } from "@/components/data-health";
 import { useStudySync } from "@/hooks/use-study-sync";
 import { scoreExam, shuffle, summarizeAnswers } from "@/lib/exam";
 import {
@@ -62,6 +63,8 @@ export default function Home() {
     saveNow,
     retrySync,
     signOut: signOutCloud,
+    restoreSnapshot,
+    diagnostics,
   } = useStudySync();
   const [view, setView] = useState<
       "home" | "subject" | "manage" | "play" | "result"
@@ -743,6 +746,29 @@ export default function Home() {
           </div>
         </div>
       </header>
+      {(!diagnostics.storageHealthy ||
+        syncStatus === "error" ||
+        !diagnostics.supabaseConfigured) && (
+        <div className="bg-amber-50 px-5 py-3 text-sm text-amber-900">
+          <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-3">
+            <p className="font-bold">
+              {!diagnostics.storageHealthy
+                ? "この端末の保存に失敗しています（容量不足やプライベートモードの可能性）。データが消える前にバックアップをダウンロードしてください。"
+                : syncStatus === "error"
+                  ? "クラウドに保存できていません。この端末には残っていますが、他の端末には反映されません。"
+                  : "クラウド同期が無効です。データはこの端末にだけ保存され、他の端末では見られません。"}
+            </p>
+            {syncStatus === "error" && (
+              <button
+                onClick={retrySync}
+                className="rounded-lg bg-amber-600 px-4 py-2 font-bold text-white"
+              >
+                再試行
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       {loadingMessage && (
         <div className="fixed inset-0 z-50 grid place-items-center bg-white/85 p-6 backdrop-blur-sm">
           <div className="text-center">
@@ -967,6 +993,12 @@ export default function Home() {
                 「科目を追加」から始めましょう
               </div>
             )}
+            <DataHealth
+              diagnostics={diagnostics}
+              snapshot={{ subjects, attempts }}
+              onSaveNow={() => saveNow()}
+              onRestore={restoreSnapshot}
+            />
           </>
         )}
         {view === "subject" && subject && (

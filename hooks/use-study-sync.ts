@@ -9,6 +9,31 @@ import {
   type SetStateAction,
 } from "react";
 import type { Session } from "@supabase/supabase-js";
+import {
+  ATTEMPTS_KEY,
+  CACHE_DIRTY_KEY,
+  CACHE_UPDATED_KEY,
+  SUBJECTS_KEY,
+  SYNCED_IDS_KEY,
+  countQuestions,
+  emptySyncedIds,
+  getStorageError,
+  isEmptySnapshot,
+  isStorageDegraded,
+  isStorageHealthy,
+  mergeSnapshots,
+  readBackup,
+  readJson,
+  readRaw,
+  removeRaw,
+  snapshotIds,
+  userKey,
+  writeBackup,
+  writeJson,
+  writeRaw,
+  writeSnapshotKeys,
+  type SyncedIds,
+} from "@/lib/local-store";
 import { dedupeQuestions } from "@/lib/questions";
 import {
   loadLegacyData,
@@ -20,13 +45,25 @@ import {
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 import type { Attempt, Subject, SyncStatus } from "@/lib/study-types";
 
-const SUBJECTS_KEY = "study_subjects_v2";
-const ATTEMPTS_KEY = "study_attempts_v2";
-const CACHE_UPDATED_KEY = "study_cache_updated_v2";
-const CACHE_DIRTY_KEY = "study_cache_dirty_v2";
 const forceLegacyStorage =
   process.env.NEXT_PUBLIC_STUDY_STORAGE_MODE === "legacy";
-const userCacheKey = (key: string, userId: string) => `${key}:${userId}`;
+
+export type SyncDiagnostics = {
+  supabaseConfigured: boolean;
+  signedIn: boolean;
+  email: string | null;
+  status: SyncStatus;
+  storageMode: "relational" | "legacy" | "local";
+  storageHealthy: boolean;
+  storageError: string | null;
+  lastError: string | null;
+  lastSyncedAt: number | null;
+  pendingChanges: boolean;
+  restoredFromDevice: number;
+  local: { subjects: number; questions: number; attempts: number };
+  remote: { subjects: number; attempts: number } | null;
+};
+
 const serialize = (subjects: Subject[], attempts: Attempt[]) =>
   JSON.stringify({ subjects, attempts });
 const dedupeSubjects = (subjects: Subject[]) =>
@@ -43,36 +80,33 @@ const dedupeSubjects = (subjects: Subject[]) =>
       ]),
     ).values(),
   );
-const readJson = <T>(key: string, fallback: T): T => {
-  try {
-    return JSON.parse(localStorage.getItem(key) || JSON.stringify(fallback));
-  } catch {
-    return fallback;
-  }
+const normalize = (snapshot: StudySnapshot): StudySnapshot => ({
+  subjects: dedupeSubjects(snapshot.subjects),
+  attempts: Array.isArray(snapshot.attempts) ? snapshot.attempts : [],
+});
+const readCache = (userId?: string): StudySnapshot => ({
+  subjects: readJson<Subject[]>(
+    userId ? userKey(SUBJECTS_KEY, userId) : SUBJECTS_KEY,
+    [],
+  ),
+  attempts: readJson<Attempt[]>(
+    userId ? userKey(ATTEMPTS_KEY, userId) : ATTEMPTS_KEY,
+    [],
+  ),
+});
+const readSyncedIds = (userId: string): SyncedIds => {
+  const stored = readJson<Partial<SyncedIds>>(
+    userKey(SYNCED_IDS_KEY, userId),
+    {},
+  );
+  return {
+    subjects: Array.isArray(stored.subjects) ? stored.subjects : [],
+    questions: Array.isArray(stored.questions) ? stored.questions : [],
+    attempts: Array.isArray(stored.attempts) ? stored.attempts : [],
+  };
 };
-const writeUserCache = (
-  userId: string,
-  subjects: Subject[],
-  attempts: Attempt[],
-  updatedAt = Date.now(),
-) => {
-  localStorage.setItem(
-    userCacheKey(SUBJECTS_KEY, userId),
-    JSON.stringify(subjects),
-  );
-  localStorage.setItem(
-    userCacheKey(ATTEMPTS_KEY, userId),
-    JSON.stringify(attempts),
-  );
-  localStorage.setItem(
-    userCacheKey(CACHE_UPDATED_KEY, userId),
-    String(updatedAt),
-  );
-};
-const markUserCacheDirty = (userId: string) =>
-  localStorage.setItem(userCacheKey(CACHE_DIRTY_KEY, userId), "1");
-const clearUserCacheDirty = (userId: string) =>
-  localStorage.removeItem(userCacheKey(CACHE_DIRTY_KEY, userId));
+const errorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
 
 export function useStudySync() {
   const [ready, setReady] = useState(false);
@@ -85,6 +119,17 @@ export function useStudySync() {
     isSupabaseConfigured ? "loading" : "offline",
   );
   const [syncRetry, setSyncRetry] = useState(0);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null);
+  const [remoteCounts, setRemoteCounts] = useState<{
+    subjects: number;
+    attempts: number;
+  } | null>(null);
+  const [restoredFromDevice, setRestoredFromDevice] = useState(0);
+  const [pendingChanges, setPendingChanges] = useState(false);
+  const [storageModeLabel, setStorageModeLabel] = useState<
+    "relational" | "legacy"
+  >("legacy");
   const lastSyncedData = useRef("");
   const lastSyncedSnapshot = useRef<StudySnapshot>({
     subjects: [],
@@ -96,6 +141,7 @@ export function useStudySync() {
   const attemptsRef = useRef<Attempt[]>([]);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
   const cacheLoadedForUser = useRef<string | null>(null);
+  const suppressSync = useRef(false);
   const sessionUserId = session?.user.id;
 
   useEffect(() => {
@@ -103,39 +149,98 @@ export function useStudySync() {
     attemptsRef.current = attempts;
   }, [subjects, attempts]);
 
+  /**
+   * 端末へ保存する。intent="user"は利用者の操作によるもので、内容が空でも
+   * そのまま保存する。intent="mirror"はクラウド読み込み結果の写しなので、
+   * 中身のあるデータを空で上書きしないようにする。
+   */
+  const writeLocalSnapshot = useCallback(
+    (
+      userId: string | undefined,
+      snapshot: StudySnapshot,
+      intent: "user" | "mirror",
+      updatedAt = Date.now(),
+    ) => {
+      const empty = isEmptySnapshot(snapshot);
+      if (userId) {
+        if (intent === "mirror" && empty && !isEmptySnapshot(readCache(userId)))
+          return true;
+        const ok =
+          writeSnapshotKeys(
+            userKey(SUBJECTS_KEY, userId),
+            userKey(ATTEMPTS_KEY, userId),
+            snapshot,
+          ) && writeRaw(userKey(CACHE_UPDATED_KEY, userId), String(updatedAt));
+        if (intent === "user" || !empty) writeBackup(userId, snapshot);
+        return ok;
+      }
+      // ログインしていない状態では端末内保存のみで動かす
+      if (isSupabaseConfigured) return true;
+      if (intent === "mirror" && empty && !isEmptySnapshot(readCache()))
+        return true;
+      const ok = writeSnapshotKeys(SUBJECTS_KEY, ATTEMPTS_KEY, snapshot);
+      if (intent === "user" || !empty) writeBackup(undefined, snapshot);
+      return ok;
+    },
+    [],
+  );
+
+  const markDirty = useCallback((userId: string) => {
+    writeRaw(userKey(CACHE_DIRTY_KEY, userId), "1");
+    setPendingChanges(true);
+  }, []);
+  const clearDirty = useCallback((userId: string) => {
+    removeRaw(userKey(CACHE_DIRTY_KEY, userId));
+    setPendingChanges(false);
+  }, []);
+
   const updateSubjects: Dispatch<SetStateAction<Subject[]>> = useCallback(
-    (value) =>
-      setSubjects((current) => {
-        const next = dedupeSubjects(
-          typeof value === "function" ? value(current) : value,
-        );
-        subjectsRef.current = next;
-        if (sessionUserId) {
-          writeUserCache(sessionUserId, next, attemptsRef.current);
-          markUserCacheDirty(sessionUserId);
-        }
-        return next;
-      }),
-    [sessionUserId],
+    (value) => {
+      const next = dedupeSubjects(
+        typeof value === "function"
+          ? (value as (current: Subject[]) => Subject[])(subjectsRef.current)
+          : value,
+      );
+      subjectsRef.current = next;
+      suppressSync.current = false;
+      setSubjects(next);
+      writeLocalSnapshot(
+        sessionUserId,
+        { subjects: next, attempts: attemptsRef.current },
+        "user",
+      );
+      if (sessionUserId) markDirty(sessionUserId);
+    },
+    [sessionUserId, writeLocalSnapshot, markDirty],
   );
   const updateAttempts: Dispatch<SetStateAction<Attempt[]>> = useCallback(
-    (value) =>
-      setAttempts((current) => {
-        const next = typeof value === "function" ? value(current) : value;
-        attemptsRef.current = next;
-        if (sessionUserId) {
-          writeUserCache(sessionUserId, subjectsRef.current, next);
-          markUserCacheDirty(sessionUserId);
-        }
-        return next;
-      }),
-    [sessionUserId],
+    (value) => {
+      const next =
+        typeof value === "function"
+          ? (value as (current: Attempt[]) => Attempt[])(attemptsRef.current)
+          : value;
+      attemptsRef.current = next;
+      suppressSync.current = false;
+      setAttempts(next);
+      writeLocalSnapshot(
+        sessionUserId,
+        { subjects: subjectsRef.current, attempts: next },
+        "user",
+      );
+      if (sessionUserId) markDirty(sessionUserId);
+    },
+    [sessionUserId, writeLocalSnapshot, markDirty],
   );
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      setSubjects(readJson(SUBJECTS_KEY, []));
-      setAttempts(readJson(ATTEMPTS_KEY, []));
+      const cached = readCache();
+      // 端末内の保存が壊れていた場合はバックアップから復旧する
+      const snapshot = isEmptySnapshot(cached)
+        ? (readBackup() ?? cached)
+        : cached;
+      setSubjects(dedupeSubjects(snapshot.subjects));
+      setAttempts(snapshot.attempts);
       setReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
@@ -143,29 +248,44 @@ export function useStudySync() {
 
   useEffect(() => {
     if (!ready) return;
-    if (sessionUserId) {
-      if (!cloudReady) return;
-      const serialized = serialize(subjects, attempts);
-      const cacheUpdatedAt =
-        serialized === lastSyncedData.current && lastRemoteUpdatedAt.current
-          ? lastRemoteUpdatedAt.current
-          : Date.now();
-      writeUserCache(sessionUserId, subjects, attempts, cacheUpdatedAt);
-    } else if (!isSupabaseConfigured) {
-      localStorage.setItem(SUBJECTS_KEY, JSON.stringify(subjects));
-      localStorage.setItem(ATTEMPTS_KEY, JSON.stringify(attempts));
-    }
-  }, [subjects, attempts, ready, sessionUserId, cloudReady]);
+    if (sessionUserId && !cloudReady) return;
+    const serialized = serialize(subjects, attempts);
+    const cacheUpdatedAt =
+      serialized === lastSyncedData.current && lastRemoteUpdatedAt.current
+        ? lastRemoteUpdatedAt.current
+        : Date.now();
+    writeLocalSnapshot(
+      sessionUserId,
+      { subjects, attempts },
+      "mirror",
+      cacheUpdatedAt,
+    );
+  }, [
+    subjects,
+    attempts,
+    ready,
+    sessionUserId,
+    cloudReady,
+    writeLocalSnapshot,
+  ]);
 
   useEffect(() => {
     if (!ready || !supabase) return;
     let active = true;
-    supabase.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setSession(data.session);
-      setAuthChecked(true);
-      if (!data.session) setSyncStatus("offline");
-    });
+    supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!active) return;
+        setSession(data.session);
+        setAuthChecked(true);
+        if (!data.session) setSyncStatus("offline");
+      })
+      .catch((error: unknown) => {
+        if (!active) return;
+        setAuthChecked(true);
+        setLastError(errorMessage(error));
+        setSyncStatus("error");
+      });
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((event, nextSession) => {
@@ -173,6 +293,7 @@ export function useStudySync() {
       setSession(nextSession);
       setAuthChecked(true);
       if (nextSession && event === "SIGNED_IN") {
+        suppressSync.current = false;
         setCloudReady(false);
         setSyncStatus("loading");
       } else if (!nextSession) {
@@ -195,195 +316,208 @@ export function useStudySync() {
     const userId = sessionUserId;
 
     async function loadCloudData() {
-      const firstLoadForUser = cacheLoadedForUser.current !== userId;
-      let cachedSubjects: Subject[];
-      let cachedAttempts: Attempt[];
-      if (firstLoadForUser) {
-        const userSubjectsKey = userCacheKey(SUBJECTS_KEY, userId);
-        const userAttemptsKey = userCacheKey(ATTEMPTS_KEY, userId);
-        const hasUserSubjectsCache =
-          localStorage.getItem(userSubjectsKey) !== null;
-        const hasUserAttemptsCache =
-          localStorage.getItem(userAttemptsKey) !== null;
-        const userSubjects = readJson<Subject[]>(
-          userSubjectsKey,
-          [],
-        );
-        const legacySubjects = readJson<Subject[]>(SUBJECTS_KEY, []);
-        cachedSubjects = dedupeSubjects(
-          hasUserSubjectsCache ? userSubjects : legacySubjects,
-        );
-        const userAttempts = readJson<Attempt[]>(
-          userAttemptsKey,
-          [],
-        );
-        const legacyAttempts = readJson<Attempt[]>(ATTEMPTS_KEY, []);
-        cachedAttempts = hasUserAttemptsCache ? userAttempts : legacyAttempts;
-        cacheLoadedForUser.current = userId;
-        subjectsRef.current = cachedSubjects;
-        attemptsRef.current = cachedAttempts;
-        setSubjects(cachedSubjects);
-        setAttempts(cachedAttempts);
-      } else {
-        cachedSubjects = dedupeSubjects(subjectsRef.current);
-        cachedAttempts = attemptsRef.current;
-      }
-      const cachedSerialized = serialize(cachedSubjects, cachedAttempts);
-      const hasUnsyncedCache =
-        localStorage.getItem(userCacheKey(CACHE_DIRTY_KEY, userId)) === "1";
       const client = supabase!;
+      const firstLoadForUser = cacheLoadedForUser.current !== userId;
+      let cached: StudySnapshot;
+      if (firstLoadForUser) {
+        const userCache = readCache(userId);
+        // 初回ログイン時のみ、ログイン前に端末へ保存されていた分を引き継ぐ
+        cached = normalize(
+          isEmptySnapshot(userCache) ? readCache() : userCache,
+        );
+        if (isEmptySnapshot(cached))
+          cached = normalize(readBackup(userId) ?? cached);
+        cacheLoadedForUser.current = userId;
+        subjectsRef.current = cached.subjects;
+        attemptsRef.current = cached.attempts;
+        setSubjects(cached.subjects);
+        setAttempts(cached.attempts);
+      } else {
+        cached = normalize({
+          subjects: subjectsRef.current,
+          attempts: attemptsRef.current,
+        });
+      }
+      const cachedSerialized = serialize(cached.subjects, cached.attempts);
+      const hasUnsyncedCache =
+        readRaw(userKey(CACHE_DIRTY_KEY, userId)) === "1";
+
       const [legacy, relational] = await Promise.all([
         loadLegacyData(client, userId),
         forceLegacyStorage
           ? Promise.resolve({
               available: false,
-              subjects: [],
-              attempts: [],
+              subjects: [] as Subject[],
+              attempts: [] as Attempt[],
               updatedAt: 0,
+              error: undefined as string | undefined,
             })
           : loadRelationalData(client, userId),
       ]);
       if (!active) return;
 
-      storageMode.current = relational.available ? "relational" : "legacy";
-      let remote: StudySnapshot =
-        relational.available && relational.updatedAt >= legacy.updatedAt
-          ? {
-              subjects: dedupeSubjects(relational.subjects),
-              attempts: relational.attempts,
-            }
-          : {
-              subjects: dedupeSubjects(legacy.subjects),
-              attempts: legacy.attempts,
-            };
-      let remoteUpdatedAt =
-        relational.available && relational.updatedAt >= legacy.updatedAt
-          ? relational.updatedAt
-          : legacy.updatedAt;
-      const latestSubjects = dedupeSubjects(subjectsRef.current);
-      const latestAttempts = attemptsRef.current;
-      const latestSerialized = serialize(latestSubjects, latestAttempts);
-      const changedDuringLoad = latestSerialized !== cachedSerialized;
-      const remoteIsEmpty = remote.subjects.length + remote.attempts.length === 0;
-      const cachedHasData =
-        cachedSubjects.length + cachedAttempts.length > 0;
-      const shouldPersistLocal =
-        changedDuringLoad ||
-        hasUnsyncedCache ||
-        (remoteIsEmpty && cachedHasData);
-
-      if (shouldPersistLocal) {
-        const next: StudySnapshot = {
-          subjects: changedDuringLoad ? latestSubjects : cachedSubjects,
-          attempts: changedDuringLoad ? latestAttempts : cachedAttempts,
-        };
-        const updatedAt = new Date().toISOString();
-        if (relational.available) {
-          await saveRelationalChanges(client, remote, next, updatedAt);
-          storageMode.current = "relational";
-        }
-        await saveLegacyBackup(client, userId, next, updatedAt);
-        if (!active) return;
-        remote = next;
-        remoteUpdatedAt = Date.parse(updatedAt);
-        clearUserCacheDirty(userId);
-      } else if (
-        relational.available &&
-        legacy.updatedAt > relational.updatedAt
-      ) {
-        const migratedAt = new Date(legacy.updatedAt || Date.now()).toISOString();
-        await saveRelationalChanges(
-          client,
-          {
-            subjects: dedupeSubjects(relational.subjects),
-            attempts: relational.attempts,
-          },
-          remote,
-          migratedAt,
+      if (!legacy.available && !relational.available) {
+        // 読み込めなかったときに端末のデータを空で置き換えない
+        throw new Error(
+          legacy.error ||
+            relational.error ||
+            "クラウドから読み込めませんでした",
         );
-        storageMode.current = "relational";
       }
 
-      const remoteSerialized = serialize(remote.subjects, remote.attempts);
-      lastSyncedData.current = remoteSerialized;
-      lastSyncedSnapshot.current = remote;
-      lastRemoteUpdatedAt.current = remoteUpdatedAt;
-      subjectsRef.current = remote.subjects;
-      attemptsRef.current = remote.attempts;
-      setSubjects(remote.subjects);
-      setAttempts(remote.attempts);
+      const useRelational =
+        relational.available &&
+        (!legacy.available || relational.updatedAt >= legacy.updatedAt);
+      storageMode.current = relational.available ? "relational" : "legacy";
+      setStorageModeLabel(storageMode.current);
+      let remote: StudySnapshot = normalize(
+        useRelational
+          ? { subjects: relational.subjects, attempts: relational.attempts }
+          : { subjects: legacy.subjects, attempts: legacy.attempts },
+      );
+      let remoteUpdatedAt = useRelational
+        ? relational.updatedAt
+        : legacy.updatedAt;
+      setRemoteCounts({
+        subjects: remote.subjects.length,
+        attempts: remote.attempts.length,
+      });
 
-      localStorage.removeItem(SUBJECTS_KEY);
-      localStorage.removeItem(ATTEMPTS_KEY);
+      const latest = normalize({
+        subjects: subjectsRef.current,
+        attempts: attemptsRef.current,
+      });
+      const changedDuringLoad =
+        serialize(latest.subjects, latest.attempts) !== cachedSerialized;
+      const local = changedDuringLoad ? latest : cached;
+      const syncedIds = firstLoadForUser
+        ? readSyncedIds(userId)
+        : snapshotIds(lastSyncedSnapshot.current);
+      const { snapshot: merged, restored } = mergeSnapshots(
+        remote,
+        local,
+        syncedIds,
+      );
+      if (restored) setRestoredFromDevice((count) => count + restored);
+
+      let next = merged;
+      if (isEmptySnapshot(next)) {
+        // クラウドも端末も空に見えるときは、端末内バックアップから戻す
+        const backup = readBackup(userId) ?? readBackup();
+        if (backup && !isEmptySnapshot(backup)) {
+          next = normalize(backup);
+          setRestoredFromDevice(
+            (count) => count + next.subjects.length + next.attempts.length,
+          );
+        }
+      }
+
+      const mustUpload =
+        serialize(next.subjects, next.attempts) !==
+          serialize(remote.subjects, remote.attempts) || hasUnsyncedCache;
+      if (mustUpload) {
+        const uploadedAt = await uploadSnapshot(
+          client,
+          userId,
+          remote,
+          next,
+          storageMode.current === "relational",
+        );
+        if (!active) return;
+        remote = next;
+        remoteUpdatedAt = uploadedAt;
+        clearDirty(userId);
+      }
+
+      lastSyncedData.current = serialize(next.subjects, next.attempts);
+      lastSyncedSnapshot.current = next;
+      lastRemoteUpdatedAt.current = remoteUpdatedAt;
+      subjectsRef.current = next.subjects;
+      attemptsRef.current = next.attempts;
+      setSubjects(next.subjects);
+      setAttempts(next.attempts);
+      setRemoteCounts({
+        subjects: remote.subjects.length,
+        attempts: remote.attempts.length,
+      });
+
+      const stored = writeLocalSnapshot(userId, next, "user", remoteUpdatedAt);
+      writeJson(userKey(SYNCED_IDS_KEY, userId), snapshotIds(next));
+      if (stored) {
+        // 引き継ぎ済みのログイン前データを片付ける（保存できたときだけ）
+        removeRaw(SUBJECTS_KEY);
+        removeRaw(ATTEMPTS_KEY);
+      }
+      setLastError(null);
+      setLastSyncedAt(Date.now());
       setSyncStatus("saved");
       setCloudReady(true);
     }
 
-    loadCloudData().catch(() => {
-      if (active) {
-        setSyncStatus("error");
-        setCloudReady(false);
-      }
+    loadCloudData().catch((error: unknown) => {
+      if (!active) return;
+      setLastError(errorMessage(error));
+      setSyncStatus("error");
+      setCloudReady(false);
     });
     return () => {
       active = false;
     };
-  }, [ready, sessionUserId, syncRetry]);
+  }, [ready, sessionUserId, syncRetry, clearDirty, writeLocalSnapshot]);
 
   const persistSnapshot = useCallback(
     (nextSnapshot: StudySnapshot) => {
       if (!supabase || !sessionUserId || !cloudReady)
         return Promise.reject(new Error("クラウド同期の準備ができていません"));
       const client = supabase;
+      const userId = sessionUserId;
       const serialized = serialize(
         nextSnapshot.subjects,
         nextSnapshot.attempts,
       );
       setSyncStatus("saving");
       const operation = saveQueue.current.then(async () => {
-        const updatedAt = new Date().toISOString();
         const previousSnapshot = lastSyncedSnapshot.current;
+        let updatedAt: number;
         try {
-          if (storageMode.current === "relational") {
-            try {
-              await saveRelationalChanges(
-                client,
-                previousSnapshot,
-                nextSnapshot,
-                updatedAt,
-              );
-            } catch {
-              storageMode.current = "legacy";
-            }
-          }
-          await saveLegacyBackup(
+          updatedAt = await uploadSnapshot(
             client,
-            sessionUserId,
+            userId,
+            previousSnapshot,
             nextSnapshot,
-            updatedAt,
+            storageMode.current === "relational",
           );
         } catch (error) {
+          setLastError(errorMessage(error));
           setSyncStatus("error");
           throw error;
         }
         lastSyncedData.current = serialized;
         lastSyncedSnapshot.current = nextSnapshot;
-        lastRemoteUpdatedAt.current = Date.parse(updatedAt);
+        lastRemoteUpdatedAt.current = updatedAt;
+        writeJson(userKey(SYNCED_IDS_KEY, userId), snapshotIds(nextSnapshot));
+        setRemoteCounts({
+          subjects: nextSnapshot.subjects.length,
+          attempts: nextSnapshot.attempts.length,
+        });
+        setLastError(null);
+        setLastSyncedAt(Date.now());
         if (
           serialize(subjectsRef.current, attemptsRef.current) === serialized
         ) {
-          clearUserCacheDirty(sessionUserId);
+          clearDirty(userId);
           setSyncStatus("saved");
         }
       });
       saveQueue.current = operation.catch(() => undefined);
       return operation;
     },
-    [sessionUserId, cloudReady],
+    [sessionUserId, cloudReady, clearDirty],
   );
 
   useEffect(() => {
     if (!supabase || !sessionUserId || !cloudReady) return;
+    if (suppressSync.current) return;
     const serialized = serialize(subjects, attempts);
     if (serialized === lastSyncedData.current) return;
     const nextSnapshot = { subjects, attempts };
@@ -405,8 +539,38 @@ export function useStudySync() {
     [persistSnapshot],
   );
 
+  // アプリを閉じる・タブを切り替えるときに、未送信の変更を送り出す
+  useEffect(() => {
+    if (!isSupabaseConfigured) return;
+    const flush = () => {
+      const snapshot = {
+        subjects: subjectsRef.current,
+        attempts: attemptsRef.current,
+      };
+      if (
+        serialize(snapshot.subjects, snapshot.attempts) ===
+        lastSyncedData.current
+      )
+        return;
+      if (sessionUserId) writeLocalSnapshot(sessionUserId, snapshot, "user");
+      void saveNow(snapshot).catch(() => undefined);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [saveNow, sessionUserId, writeLocalSnapshot]);
+
   async function signOut() {
     if (!supabase) return;
+    // 同期を止めてから状態を空にする（空の内容がクラウドへ送られないように）
+    suppressSync.current = true;
+    setCloudReady(false);
     await supabase.auth.signOut();
     cacheLoadedForUser.current = null;
     subjectsRef.current = [];
@@ -423,6 +587,49 @@ export function useStudySync() {
     setSyncRetry((value) => value + 1);
   }
 
+  /** バックアップファイルの内容を取り込む（現在のデータへ足し込む） */
+  const restoreSnapshot = useCallback(
+    async (snapshot: StudySnapshot) => {
+      const merged = mergeSnapshots(
+        normalize({
+          subjects: subjectsRef.current,
+          attempts: attemptsRef.current,
+        }),
+        normalize(snapshot),
+        emptySyncedIds,
+      ).snapshot;
+      subjectsRef.current = merged.subjects;
+      attemptsRef.current = merged.attempts;
+      setSubjects(merged.subjects);
+      setAttempts(merged.attempts);
+      writeLocalSnapshot(sessionUserId, merged, "user");
+      if (sessionUserId) markDirty(sessionUserId);
+      if (supabase && sessionUserId && cloudReady) await saveNow(merged);
+      return merged;
+    },
+    [sessionUserId, cloudReady, saveNow, writeLocalSnapshot, markDirty],
+  );
+
+  const diagnostics: SyncDiagnostics = {
+    supabaseConfigured: isSupabaseConfigured,
+    signedIn: !!sessionUserId,
+    email: session?.user.email ?? null,
+    status: syncStatus,
+    storageMode: isSupabaseConfigured ? storageModeLabel : "local",
+    storageHealthy: isStorageHealthy() && !isStorageDegraded(),
+    storageError: getStorageError(),
+    lastError,
+    lastSyncedAt,
+    pendingChanges,
+    restoredFromDevice,
+    local: {
+      subjects: subjects.length,
+      questions: countQuestions(subjects),
+      attempts: attempts.length,
+    },
+    remote: remoteCounts,
+  };
+
   return {
     ready,
     subjects,
@@ -435,5 +642,35 @@ export function useStudySync() {
     saveNow,
     retrySync,
     signOut,
+    restoreSnapshot,
+    diagnostics,
   };
+}
+
+/**
+ * クラウドへ書き込む。分割テーブルへの保存が一部でも失敗した場合は、
+ * 完全な内容を持つuser_dataを必ず新しい時刻で保存し、次回読み込みで
+ * 欠けたデータが正になるのを防ぐ。
+ */
+async function uploadSnapshot(
+  client: NonNullable<typeof supabase>,
+  userId: string,
+  previous: StudySnapshot,
+  next: StudySnapshot,
+  useRelational: boolean,
+) {
+  const updatedAt = new Date().toISOString();
+  let relationalError: unknown = null;
+  if (useRelational && !forceLegacyStorage) {
+    try {
+      await saveRelationalChanges(client, previous, next, updatedAt);
+    } catch (error) {
+      relationalError = error;
+    }
+  }
+  const legacyAt = relationalError
+    ? new Date(Date.now() + 1000).toISOString()
+    : updatedAt;
+  await saveLegacyBackup(client, userId, next, legacyAt);
+  return Date.parse(legacyAt);
 }
