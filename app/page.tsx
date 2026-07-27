@@ -59,9 +59,6 @@ export default function Home() {
     session,
     authChecked,
     syncStatus,
-    syncProgress,
-    lastSyncedAt,
-    syncError,
     saveNow,
     retrySync,
     signOut: signOutCloud,
@@ -727,46 +724,22 @@ export default function Home() {
           </button>
           <div className="flex items-center gap-3 text-right">
             <div>
-              <button
-                onClick={retrySync}
-                disabled={
-                  !session ||
-                  syncStatus === "loading" ||
-                  syncStatus === "saving"
-                }
-                className={`text-xs font-bold disabled:cursor-wait ${
-                  syncStatus === "error"
-                    ? "text-amber-300"
-                    : "text-blue-200"
-                }`}
-                title="Supabaseの科目・問題・結果を今すぐ同期"
-              >
-                {syncStatus === "error"
-                  ? "同期エラー・再試行"
-                  : syncStatus === "saved"
-                    ? "クラウドに保存済み・今すぐ同期"
-                    : syncStatus === "saving"
-                      ? `保存中… ${syncProgress}%`
-                      : syncStatus === "loading"
-                        ? `同期中… ${syncProgress}%`
-                        : "端末内に保存"}
-              </button>
-              {lastSyncedAt && syncStatus !== "loading" && (
-                <p className="text-[10px] text-white/60">
-                  最終同期{" "}
-                  {new Date(lastSyncedAt).toLocaleTimeString("ja-JP", {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    second: "2-digit",
-                  })}
-                </p>
-              )}
-              {syncError && (
-                <p
-                  className="max-w-52 truncate text-[10px] text-amber-200"
-                  title={syncError}
+              {syncStatus === "error" ? (
+                <button
+                  onClick={retrySync}
+                  className="text-xs font-bold text-amber-300"
                 >
-                  {syncError}
+                  同期エラー・再試行
+                </button>
+              ) : (
+                <p className="text-xs text-blue-200">
+                  {syncStatus === "saved"
+                    ? "クラウドに保存済み"
+                    : syncStatus === "saving"
+                      ? "保存中…"
+                      : syncStatus === "loading"
+                        ? "同期中…"
+                        : "端末内に保存"}
                 </p>
               )}
               {session?.user.email && (

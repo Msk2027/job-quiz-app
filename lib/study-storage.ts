@@ -78,37 +78,15 @@ const throwIfError = (error: { message: string } | null) => {
   if (error) throw new Error(error.message);
 };
 
-const withTimeout = async <T>(
-  operation: PromiseLike<T>,
-  milliseconds = 25_000,
-): Promise<T> => {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    return await Promise.race([
-      Promise.resolve(operation),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("クラウド同期がタイムアウトしました")),
-          milliseconds,
-        );
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-};
-
 export async function loadLegacyData(
   client: SupabaseClient,
   userId: string,
 ): Promise<StorageResult> {
-  const { data, error } = await withTimeout(
-    client
-      .from("user_data")
-      .select("subjects, attempts, updated_at")
-      .eq("user_id", userId)
-      .maybeSingle(),
-  );
+  const { data, error } = await client
+    .from("user_data")
+    .select("subjects, attempts, updated_at")
+    .eq("user_id", userId)
+    .maybeSingle();
   throwIfError(error);
   return {
     available: true,
@@ -124,7 +102,7 @@ export async function loadRelationalData(
 ): Promise<StorageResult> {
   try {
     const [stateResult, subjectsResult, questionsResult, attemptsResult, answersResult] =
-      await withTimeout(Promise.all([
+      await Promise.all([
         client
           .from("study_storage_state")
           .select("updated_at")
@@ -156,7 +134,7 @@ export async function loadRelationalData(
           )
           .eq("user_id", userId)
           .order("answer_index"),
-      ]));
+      ]);
 
     throwIfError(stateResult.error);
     throwIfError(subjectsResult.error);
@@ -314,7 +292,7 @@ export async function saveRelationalChanges(
     }
   });
 
-  const results = await withTimeout(Promise.all(operations));
+  const results = await Promise.all(operations);
   const failed = results.find(
     (result) =>
       typeof result === "object" &&
@@ -331,13 +309,11 @@ export async function saveLegacyBackup(
   snapshot: StudySnapshot,
   updatedAt: string,
 ) {
-  const { error } = await withTimeout(
-    client.from("user_data").upsert({
-      user_id: userId,
-      subjects: snapshot.subjects,
-      attempts: snapshot.attempts,
-      updated_at: updatedAt,
-    }),
-  );
+  const { error } = await client.from("user_data").upsert({
+    user_id: userId,
+    subjects: snapshot.subjects,
+    attempts: snapshot.attempts,
+    updated_at: updatedAt,
+  });
   throwIfError(error);
 }
