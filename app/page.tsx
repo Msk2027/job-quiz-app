@@ -220,9 +220,11 @@ export default function Home() {
           setSelected(s.id);
           setView("subject");
           setPendingImport(null);
-        } catch {
+        } catch (error) {
           alert(
-            "問題を作成・保存できませんでした。通信状態と公開CSV URLを確認してください。",
+            error instanceof Error
+              ? error.message
+              : "問題を作成・保存できませんでした。通信状態と公開CSV URLを確認してください。",
           );
         }
       },
@@ -236,8 +238,12 @@ export default function Home() {
       const questions = await loadSheet(subjectSettings.source.url);
       setSubjectSettings({ ...subjectSettings, questions });
       alert(`${questions.length}問を読み込みました`);
-    } catch {
-      alert("シートを読み込めませんでした。公開CSV URLを確認してください。");
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "シートを読み込めませんでした。公開CSV URLを確認してください。",
+      );
     } finally {
       setSettingsLoading(false);
     }
@@ -252,9 +258,13 @@ export default function Home() {
           ...subjectSettings,
           questions: await loadSheet(subjectSettings.source.url),
         };
-      } catch {
+      } catch (error) {
         setSettingsLoading(false);
-        return alert("CSVを読み込めませんでした。URLを確認してください。");
+        return alert(
+          error instanceof Error
+            ? error.message
+            : "CSVを読み込めませんでした。URLを確認してください。",
+        );
       }
       setSettingsLoading(false);
     } else {
@@ -272,8 +282,14 @@ export default function Home() {
         try {
           next = { ...s, questions: await loadSheet(s.source.url) };
           saveSubject(next);
-        } catch {
-          alert("同期に失敗したため、保存済みデータを表示します");
+        } catch (error) {
+          const reason =
+            error instanceof Error
+              ? `\n理由: ${error.message}`
+              : "";
+          alert(
+            `同期に失敗したため、保存済みデータを表示します。${reason}`,
+          );
         }
       }
       setSelected(s.id);
