@@ -1878,7 +1878,14 @@ export default function Home() {
                     {feedback ? "正解" : "不正解"}
                   </b>
                 )}
-                <p className="mt-2">{active[index].explanation}</p>
+                {feedback === false && (
+                  <p className="mt-2 rounded-lg bg-green-50 px-3 py-2 font-bold text-green-700">
+                    正しい答え：{active[index].answer}
+                  </p>
+                )}
+                {active[index].explanation && (
+                  <p className="mt-2">{active[index].explanation}</p>
+                )}
               </div>
             )}
             <div className="flex justify-end mt-6">
