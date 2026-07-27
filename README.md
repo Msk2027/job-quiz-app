@@ -8,8 +8,12 @@
 2. Supabaseの SQL Editor で [`supabase/schema.sql`](supabase/schema.sql) を実行します。
 3. 続けて
    [`supabase/migrations/20260725010000_relational_study_storage.sql`](supabase/migrations/20260725010000_relational_study_storage.sql)
-   を実行します。GitHub Integrationを有効にしている場合は、mainへの反映時に
+   と
+   [`supabase/migrations/20260727120000_study_deletions.sql`](supabase/migrations/20260727120000_study_deletions.sql)
+   を順に実行します。GitHub Integrationを有効にしている場合は、mainへの反映時に
    `supabase/migrations`の変更が自動適用されます。
+   後者は削除履歴（tombstone）用で、未適用でもアプリは動作しますが、
+   複数端末で削除を正しく同期するために必要です。
 4. Supabaseの Authentication > Providers で Email を有効にします。
 5. Vercelに次の環境変数を設定し、再デプロイします。
    - `NEXT_PUBLIC_SUPABASE_URL`

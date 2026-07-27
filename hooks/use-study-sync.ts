@@ -40,6 +40,7 @@ import {
   loadRelationalData,
   saveLegacyBackup,
   saveRelationalChanges,
+  type Deletions,
   type StudySnapshot,
 } from "@/lib/study-storage";
 import { isSupabaseConfigured, supabase } from "@/lib/supabase";
@@ -351,6 +352,7 @@ export function useStudySync() {
               attempts: [] as Attempt[],
               updatedAt: 0,
               error: undefined as string | undefined,
+              deletions: null as Deletions | null,
             })
           : loadRelationalData(client, userId),
       ]);
@@ -397,6 +399,7 @@ export function useStudySync() {
         remote,
         local,
         syncedIds,
+        useRelational ? (relational.deletions ?? null) : null,
       );
       if (restored) setRestoredFromDevice((count) => count + restored);
 

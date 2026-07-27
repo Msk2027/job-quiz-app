@@ -1,4 +1,4 @@
-import type { StudySnapshot } from "@/lib/study-storage";
+import type { Deletions, StudySnapshot } from "@/lib/study-storage";
 import type { Attempt, Subject } from "@/lib/study-types";
 
 export const SUBJECTS_KEY = "study_subjects_v2";
@@ -143,18 +143,26 @@ export const snapshotIds = (snapshot: StudySnapshot): SyncedIds => ({
   attempts: snapshot.attempts.map((attempt) => attempt.id),
 });
 
+/**
+ * クラウドに無いものを端末から戻すか判断する。
+ * 削除履歴（tombstone）があるときはそれが正。無いとき（migration未適用や
+ * user_data方式）だけ、「同期済みなのに消えている＝他端末で削除された」
+ * という推定にフォールバックする。
+ */
 const restoreMissing = <T extends { id: string }>(
   remote: T[],
   local: T[],
   syncedIds: string[],
+  deletedIds: string[] | null,
 ) => {
   const remoteIds = new Set(remote.map((item) => item.id));
+  const missing = local.filter((item) => !remoteIds.has(item.id));
+  if (deletedIds) {
+    const deleted = new Set(deletedIds);
+    return missing.filter((item) => !deleted.has(item.id));
+  }
   const synced = new Set(syncedIds);
-  // 同期済みなのにクラウドから消えている＝他端末で削除された、と判断する。
-  // 一度も同期していないものだけを復元するので、削除は復活しない。
-  return local.filter(
-    (item) => !remoteIds.has(item.id) && !synced.has(item.id),
-  );
+  return missing.filter((item) => !synced.has(item.id));
 };
 
 /**
@@ -165,23 +173,21 @@ export function mergeSnapshots(
   remote: StudySnapshot,
   local: StudySnapshot,
   syncedIds: SyncedIds,
+  deletions: Deletions | null = null,
 ) {
   const localSubjects = new Map(
     local.subjects.map((subject) => [subject.id, subject]),
   );
-  const syncedQuestions = new Set(syncedIds.questions);
   let restored = 0;
 
   const subjects = remote.subjects.map((subject) => {
     const localSubject = localSubjects.get(subject.id);
     if (!localSubject) return subject;
-    const remoteQuestionIds = new Set(
-      subject.questions.map((question) => question.id),
-    );
-    const missing = localSubject.questions.filter(
-      (question) =>
-        !remoteQuestionIds.has(question.id) &&
-        !syncedQuestions.has(question.id),
+    const missing = restoreMissing(
+      subject.questions,
+      localSubject.questions,
+      syncedIds.questions,
+      deletions?.questions ?? null,
     );
     if (!missing.length) return subject;
     restored += missing.length;
@@ -192,11 +198,13 @@ export function mergeSnapshots(
     remote.subjects,
     local.subjects,
     syncedIds.subjects,
+    deletions?.subjects ?? null,
   );
   const restoredAttempts = restoreMissing(
     remote.attempts,
     local.attempts,
     syncedIds.attempts,
+    deletions?.attempts ?? null,
   );
   restored += restoredSubjects.length + restoredAttempts.length;
 

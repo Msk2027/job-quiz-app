@@ -13,11 +13,43 @@ export type StudySnapshot = {
   attempts: Attempt[];
 };
 
+export type Deletions = {
+  subjects: string[];
+  questions: string[];
+  attempts: string[];
+};
+
 type StorageResult = StudySnapshot & {
   available: boolean;
   updatedAt: number;
   error?: string;
+  /** 削除履歴。取得できなかった場合はnull（従来どおりの判定にフォールバック） */
+  deletions?: Deletions | null;
 };
+
+type DeletionRow = { kind: string; id: string };
+
+async function loadDeletions(
+  client: SupabaseClient,
+  userId: string,
+): Promise<Deletions | null> {
+  try {
+    const { data, error } = await client
+      .from("study_deletions")
+      .select("kind, id")
+      .eq("user_id", userId);
+    if (error) throw new Error(error.message);
+    const rows = (data || []) as DeletionRow[];
+    return {
+      subjects: rows.filter((r) => r.kind === "subject").map((r) => r.id),
+      questions: rows.filter((r) => r.kind === "question").map((r) => r.id),
+      attempts: rows.filter((r) => r.kind === "attempt").map((r) => r.id),
+    };
+  } catch {
+    // migration未適用でも従来どおり動かす
+    return null;
+  }
+}
 
 type SubjectRow = {
   id: string;
@@ -114,40 +146,46 @@ export async function loadRelationalData(
   userId: string,
 ): Promise<StorageResult> {
   try {
-    const [stateResult, subjectsResult, questionsResult, attemptsResult, answersResult] =
-      await Promise.all([
-        client
-          .from("study_storage_state")
-          .select("updated_at")
-          .eq("user_id", userId)
-          .maybeSingle(),
-        client
-          .from("study_subjects")
-          .select("id, name, color, source, position")
-          .eq("user_id", userId)
-          .order("position"),
-        client
-          .from("study_questions")
-          .select(
-            "subject_id, id, question_type, question, options, answer, explanation, model_answer, rubric, position",
-          )
-          .eq("user_id", userId)
-          .order("position"),
-        client
-          .from("study_attempts")
-          .select(
-            "id, subject_id, subject_ids, subject_names, display_date, score, total, mode, status, pass_percentage, percentage, passed, essay_pending, time_limit_minutes, position",
-          )
-          .eq("user_id", userId)
-          .order("position"),
-        client
-          .from("study_answers")
-          .select(
-            "attempt_id, answer_index, question_id, subject_id, subject_name, question, question_type, answer, correct, correct_answer, explanation, model_answer, rubric, grading",
-          )
-          .eq("user_id", userId)
-          .order("answer_index"),
-      ]);
+    const deletionsPromise = loadDeletions(client, userId);
+    const [
+      stateResult,
+      subjectsResult,
+      questionsResult,
+      attemptsResult,
+      answersResult,
+    ] = await Promise.all([
+      client
+        .from("study_storage_state")
+        .select("updated_at")
+        .eq("user_id", userId)
+        .maybeSingle(),
+      client
+        .from("study_subjects")
+        .select("id, name, color, source, position")
+        .eq("user_id", userId)
+        .order("position"),
+      client
+        .from("study_questions")
+        .select(
+          "subject_id, id, question_type, question, options, answer, explanation, model_answer, rubric, position",
+        )
+        .eq("user_id", userId)
+        .order("position"),
+      client
+        .from("study_attempts")
+        .select(
+          "id, subject_id, subject_ids, subject_names, display_date, score, total, mode, status, pass_percentage, percentage, passed, essay_pending, time_limit_minutes, position",
+        )
+        .eq("user_id", userId)
+        .order("position"),
+      client
+        .from("study_answers")
+        .select(
+          "attempt_id, answer_index, question_id, subject_id, subject_name, question, question_type, answer, correct, correct_answer, explanation, model_answer, rubric, grading",
+        )
+        .eq("user_id", userId)
+        .order("answer_index"),
+    ]);
 
     throwIfError(stateResult.error);
     throwIfError(subjectsResult.error);
@@ -234,6 +272,7 @@ export async function loadRelationalData(
       available: true,
       subjects,
       attempts,
+      deletions: await deletionsPromise,
       updatedAt: stateResult.data?.updated_at
         ? Date.parse(String(stateResult.data.updated_at))
         : 0,
