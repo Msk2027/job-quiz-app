@@ -332,6 +332,30 @@ export default function Home() {
       setSettingsLoading(false);
     }
   }
+  async function replaceSubjectFile(file: File) {
+    if (!subjectSettings) return;
+    setSettingsLoading(true);
+    try {
+      const questions = await loadQuestionFile(file);
+      setSubjectSettings({
+        ...subjectSettings,
+        questions,
+        // 端末ファイルは自動同期できないため、以後はコピー型として保持する。
+        source: undefined,
+      });
+      alert(
+        `${questions.length}問を読み込みました。問題セットIDと結果履歴はそのまま維持されます。「保存」を押すと差し替えが確定します。`,
+      );
+    } catch (error) {
+      alert(
+        error instanceof Error
+          ? error.message
+          : "ファイルを読み込めませんでした。",
+      );
+    } finally {
+      setSettingsLoading(false);
+    }
+  }
   async function saveSettings() {
     if (!subjectSettings?.name.trim()) return alert("科目名を入力してください");
     let next = subjectSettings;
@@ -918,7 +942,7 @@ export default function Home() {
                 />
                 <button
                   onClick={() => bulkInputRef.current?.click()}
-                  className="border border-blue-600 text-blue-700 px-4 py-3 rounded-xl font-bold"
+                  className="h-12 min-w-44 rounded-xl border border-blue-600 px-4 font-bold text-blue-700"
                 >
                   複数ファイルを一括追加
                 </button>
@@ -933,13 +957,13 @@ export default function Home() {
                     setFolderSubjectIds([]);
                     setShowFolderCreator(true);
                   }}
-                  className="border border-blue-600 text-blue-700 px-4 py-3 rounded-xl font-bold"
+                  className="h-12 min-w-44 rounded-xl border border-blue-600 px-4 font-bold text-blue-700"
                 >
                   ＋ フォルダを作成
                 </button>
                 <button
                   onClick={addSubject}
-                  className="bg-blue-600 text-white px-5 py-3 rounded-xl font-bold"
+                  className="h-12 min-w-44 rounded-xl bg-blue-600 px-5 font-bold text-white"
                 >
                   ＋ 問題セットを追加
                 </button>
@@ -948,7 +972,7 @@ export default function Home() {
             <div className="mb-6 grid gap-3 sm:grid-cols-3">
               <button
                 onClick={openMixedStudySetup}
-                className="card p-5 text-left hover:border-blue-400"
+                className="card min-h-28 p-5 text-left hover:border-blue-400"
               >
                 <b className="text-lg">横断学習</b>
                 <span className="mt-1 block text-sm text-gray-500">
@@ -957,7 +981,7 @@ export default function Home() {
               </button>
               <button
                 onClick={() => setView("exam")}
-                className="card p-5 text-left hover:border-blue-400"
+                className="card min-h-28 p-5 text-left hover:border-blue-400"
               >
                 <b className="text-lg">試験モード</b>
                 <span className="mt-1 block text-sm text-gray-500">
@@ -966,7 +990,7 @@ export default function Home() {
               </button>
               <button
                 onClick={() => setView("history")}
-                className="card p-5 text-left hover:border-blue-400"
+                className="card min-h-28 p-5 text-left hover:border-blue-400"
               >
                 <b className="text-lg">すべての結果</b>
                 <span className="mt-1 block text-sm text-gray-500">
@@ -1171,7 +1195,13 @@ export default function Home() {
             )}
             <div className="space-y-6">
               {subjectGroups.map(([folder, items]) => (
-                <section key={folder}>
+                <section
+                  key={folder}
+                  style={{
+                    contentVisibility: "auto",
+                    containIntrinsicSize: "1px 320px",
+                  }}
+                >
                   <button
                     type="button"
                     onClick={() =>
@@ -1905,6 +1935,26 @@ export default function Home() {
                   </span>
                 </span>
               </label>
+              <div className="mb-5 rounded-xl border-2 border-dashed border-blue-200 p-4">
+                <p className="font-bold">CSV／XLSXファイルを差し替え</p>
+                <p className="mt-1 text-sm text-gray-500">
+                  問題だけを入れ替えます。問題セットIDとこれまでの結果履歴は維持されます。
+                </p>
+                <label className="mt-3 inline-flex h-11 cursor-pointer items-center justify-center rounded-lg border border-blue-600 px-4 font-bold text-blue-700">
+                  ファイルを選択
+                  <input
+                    type="file"
+                    accept=".csv,.xlsx,.xls"
+                    className="hidden"
+                    disabled={settingsLoading}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      if (file) void replaceSubjectFile(file);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+              </div>
               <label className="block font-bold">
                 CSV URL
                 <textarea
