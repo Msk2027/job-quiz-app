@@ -8,6 +8,7 @@ import { scoreExam, shuffle, summarizeAnswers } from "@/lib/exam";
 import {
   blankQuestion,
   dedupeQuestions,
+  loadQuestionFile,
   loadSheet,
   MAX_CHOICE_OPTIONS,
   MIN_CHOICE_OPTIONS,
@@ -67,7 +68,7 @@ export default function Home() {
     diagnostics,
   } = useStudySync();
   const [view, setView] = useState<
-      "home" | "subject" | "manage" | "play" | "result"
+      "home" | "subject" | "manage" | "play" | "result" | "history" | "exam"
     >("home"),
     [selected, setSelected] = useState("");
   const [editing, setEditing] = useState<Question | null>(null),
@@ -98,6 +99,7 @@ export default function Home() {
     [studyPassPercentage, setStudyPassPercentage] = useState("90"),
     [lastInterrupted, setLastInterrupted] = useState(false);
   const [showExamSetup, setShowExamSetup] = useState(false),
+    [setupMode, setSetupMode] = useState<"exam" | "study">("exam"),
     [examSubjectIds, setExamSubjectIds] = useState<string[]>([]),
     [examTypes, setExamTypes] = useState<QType[]>([
       "choice",
@@ -112,6 +114,8 @@ export default function Home() {
     [lastAttempt, setLastAttempt] = useState<Attempt | null>(null),
     [resultSaving, setResultSaving] = useState(false),
     [resultSaveError, setResultSaveError] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const bulkInputRef = useRef<HTMLInputElement>(null);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
     () =>
@@ -137,6 +141,17 @@ export default function Home() {
           .length,
       0,
     );
+  const visibleSubjects = subjects.filter(
+    (item) => showArchived || !item.archived,
+  );
+  const subjectGroups = useMemo(() => {
+    const groups = new Map<string, Subject[]>();
+    visibleSubjects.forEach((item) => {
+      const key = item.folder?.trim() || "未分類";
+      groups.set(key, [...(groups.get(key) || []), item]);
+    });
+    return [...groups.entries()];
+  }, [visibleSubjects]);
   const saveSubject = (s: Subject) =>
     setSubjects((current) => upsertSubject(current, s));
   async function runWithLoading<T>(message: string, task: () => Promise<T>) {
@@ -190,12 +205,13 @@ export default function Home() {
   async function addSubject() {
     const name = prompt("科目名を入力してください");
     if (!name) return;
+    const folder = prompt("授業科目・フォルダ名（任意）")?.trim() || undefined;
     const url = prompt("スプレッドシートURL（後から設定する場合は空欄）") || "";
     if (url) {
-      setPendingImport({ name, url });
+      setPendingImport({ name: folder ? `${folder}\n${name}` : name, url });
       return;
     }
-    const s = { id: uid(), name, color: "#3167e3", questions: [] };
+    const s = { id: uid(), name, folder, color: "#3167e3", questions: [] };
     saveSubject(s);
     setSelected(s.id);
     setView("subject");
@@ -207,9 +223,11 @@ export default function Home() {
       async () => {
         try {
           const questions = await loadSheet(pendingImport.url);
+          const [folderOrName, importedName] = pendingImport.name.split("\n");
           const s: Subject = {
             id: uid(),
-            name: pendingImport.name,
+            name: importedName || folderOrName,
+            ...(importedName ? { folder: folderOrName } : {}),
             color: "#3167e3",
             source: { url: pendingImport.url, mode },
             questions,
@@ -229,6 +247,44 @@ export default function Home() {
         }
       },
     );
+  }
+  async function bulkImport(files: FileList | null) {
+    if (!files?.length) return;
+    const folder = prompt("まとめ先の授業科目・フォルダ名（任意）")?.trim();
+    await runWithLoading(`${files.length}ファイルを読み込んでいます…`, async () => {
+      const next = [...subjects];
+      const errors: string[] = [];
+      for (const file of Array.from(files)) {
+        try {
+          const questions = await loadQuestionFile(file);
+          const name = file.name.replace(/\.(csv|xlsx?)$/i, "");
+          const existing = next.find(
+            (item) => item.name === name && (item.folder || "") === (folder || ""),
+          );
+          const value: Subject = existing
+            ? { ...existing, questions }
+            : {
+                id: uid(),
+                name,
+                ...(folder ? { folder } : {}),
+                color: "#3167e3",
+                questions,
+              };
+          const index = next.findIndex((item) => item.id === value.id);
+          if (index >= 0) next[index] = value;
+          else next.push(value);
+        } catch (error) {
+          errors.push(`${file.name}: ${error instanceof Error ? error.message : "読込失敗"}`);
+        }
+      }
+      setSubjects(next);
+      await saveNow({ subjects: next, attempts });
+      alert(
+        errors.length
+          ? `${files.length - errors.length}件を追加しました。\n\n${errors.join("\n")}`
+          : `${files.length}件を追加しました`,
+      );
+    });
   }
   async function reloadSettings() {
     if (!subjectSettings?.source?.url)
@@ -341,7 +397,7 @@ export default function Home() {
   }
   function openExamSetup() {
     const availableSubjects = subjects.filter(
-      (item) => item.questions.length > 0,
+      (item) => !item.archived && item.questions.length > 0,
     );
     if (!availableSubjects.length)
       return alert("問題が登録された科目を追加してください");
@@ -354,7 +410,12 @@ export default function Home() {
     setExamTypes(["choice", "ox", "fill", "essay"]);
     setExamCount(String(questionCount));
     setExamPassPercentage("90");
+    setSetupMode("exam");
     setShowExamSetup(true);
+  }
+  function openMixedStudySetup() {
+    openExamSetup();
+    setSetupMode("study");
   }
   function start() {
     if (!subject) return;
@@ -464,7 +525,7 @@ export default function Home() {
     setSubmitted(false);
     setLastInterrupted(false);
     setLastAttempt(null);
-    setSessionMode("exam");
+    setSessionMode(setupMode);
     setExamSettings({
       subjectIds: targetSubjects.map((item) => item.id),
       subjectNames,
@@ -540,7 +601,16 @@ export default function Home() {
               ? undefined
               : scoreExam(scored, examSettings.passPercentage).passed,
           }
-        : { ...baseAttempt, mode: "study" };
+        : {
+            ...baseAttempt,
+            mode: "study",
+            ...(examSettings
+              ? {
+                  subjectIds: examSettings.subjectIds,
+                  subjectNames: examSettings.subjectNames,
+                }
+              : {}),
+          };
     const nextAttempts = [
       attempt,
       ...attempts.filter((item) => item.id !== attempt.id),
@@ -801,18 +871,77 @@ export default function Home() {
           <>
             <div className="flex justify-between items-end mb-6">
               <div>
-                <h1 className="text-3xl font-black">科目</h1>
+                <h1 className="text-3xl font-black">学習ライブラリ</h1>
                 <p className="text-gray-500 mt-1">
-                  学習する科目を選んでください
+                  授業科目ごとに問題セットを整理できます
                 </p>
               </div>
+              <div className="flex flex-wrap justify-end gap-2">
+                <input
+                  ref={bulkInputRef}
+                  type="file"
+                  multiple
+                  accept=".csv,.xlsx,.xls"
+                  className="hidden"
+                  onChange={(event) => {
+                    void bulkImport(event.target.files);
+                    event.target.value = "";
+                  }}
+                />
+                <button
+                  onClick={() => bulkInputRef.current?.click()}
+                  className="border border-blue-600 text-blue-700 px-4 py-3 rounded-xl font-bold"
+                >
+                  複数ファイルを一括追加
+                </button>
+                <button
+                  onClick={addSubject}
+                  className="bg-blue-600 text-white px-5 py-3 rounded-xl font-bold"
+                >
+                  ＋ 問題セットを追加
+                </button>
+              </div>
+            </div>
+            <div className="mb-6 grid gap-3 sm:grid-cols-3">
               <button
-                onClick={addSubject}
-                className="bg-blue-600 text-white px-5 py-3 rounded-xl font-bold"
+                onClick={openMixedStudySetup}
+                className="card p-5 text-left hover:border-blue-400"
               >
-                ＋ 科目を追加
+                <b className="text-lg">横断学習</b>
+                <span className="mt-1 block text-sm text-gray-500">
+                  複数の問題セットから通常学習
+                </span>
+              </button>
+              <button
+                onClick={() => setView("exam")}
+                className="card p-5 text-left hover:border-blue-400"
+              >
+                <b className="text-lg">試験モード</b>
+                <span className="mt-1 block text-sm text-gray-500">
+                  合格基準つきの試験と結果
+                </span>
+              </button>
+              <button
+                onClick={() => setView("history")}
+                className="card p-5 text-left hover:border-blue-400"
+              >
+                <b className="text-lg">すべての結果</b>
+                <span className="mt-1 block text-sm text-gray-500">
+                  {attempts.length}件の履歴をまとめて確認
+                </span>
               </button>
             </div>
+            <div className="mb-4 flex justify-end">
+              <label className="flex items-center gap-2 text-sm text-gray-600">
+                <input
+                  type="checkbox"
+                  checked={showArchived}
+                  onChange={(event) => setShowArchived(event.target.checked)}
+                />
+                非表示の問題セットも表示
+              </label>
+            </div>
+            {false && (
             <section className="card mb-6 overflow-hidden">
               <div className="bg-gradient-to-r from-[#17233f] to-blue-700 p-6 text-white md:p-8">
                 <div className="flex flex-wrap items-center justify-between gap-4">
@@ -981,30 +1110,44 @@ export default function Home() {
                 </div>
               )}
             </section>
-            <div className="grid md:grid-cols-2 gap-4">
-              {subjects.map((s) => (
-                <button
-                  key={s.id}
-                  onClick={() => openSubject(s)}
-                  className="card p-6 text-left hover:-translate-y-1 transition"
-                >
-                  <div className="flex justify-between">
-                    <h2 className="text-xl font-black">{s.name}</h2>
-                    <span className="text-sm bg-blue-50 text-blue-700 px-3 py-1 rounded-full">
-                      {s.questions.length}問
+            )}
+            <div className="space-y-6">
+              {subjectGroups.map(([folder, items]) => (
+                <section key={folder}>
+                  <h2 className="mb-3 text-lg font-black text-gray-700">
+                    {folder}
+                    <span className="ml-2 text-sm font-normal text-gray-400">
+                      {items.length}件
                     </span>
+                  </h2>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    {items.map((s) => (
+                      <button
+                        key={s.id}
+                        onClick={() => openSubject(s)}
+                        className={`card p-6 text-left transition hover:-translate-y-1 ${s.archived ? "opacity-60" : ""}`}
+                      >
+                        <div className="flex justify-between gap-3">
+                          <h3 className="text-xl font-black">{s.name}</h3>
+                          <span className="whitespace-nowrap rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-700">
+                            {s.questions.length}問
+                          </span>
+                        </div>
+                        <p className="mt-5 text-sm text-gray-500">
+                          {s.archived && "非表示・"}
+                          {s.source
+                            ? s.source.mode === "sync"
+                              ? "スプレッドシート同期"
+                              : "スプレッドシートからコピー"
+                            : "アプリ内／ファイルから作成"}
+                        </p>
+                      </button>
+                    ))}
                   </div>
-                  <p className="text-sm text-gray-500 mt-5">
-                    {s.source
-                      ? s.source.mode === "sync"
-                        ? "スプレッドシート同期"
-                        : "スプレッドシートからコピー"
-                      : "アプリ内で作成"}
-                  </p>
-                </button>
+                </section>
               ))}
             </div>
-            {!subjects.length && (
+            {!visibleSubjects.length && (
               <div className="card text-center p-14 text-gray-500">
                 「科目を追加」から始めましょう
               </div>
@@ -1015,6 +1158,141 @@ export default function Home() {
               onSaveNow={() => saveNow()}
               onRestore={restoreSnapshot}
             />
+          </>
+        )}
+        {view === "exam" && (
+          <>
+            <button onClick={() => setView("home")} className="mb-5 text-gray-500">
+              ← 学習ライブラリ
+            </button>
+            <div className="card p-6 md:p-8">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <p className="text-sm font-bold text-blue-600">TEST MODE</p>
+                  <h1 className="mt-1 text-3xl font-black">試験モード</h1>
+                  <p className="mt-2 text-gray-500">
+                    単一または複数の授業科目から出題し、終了後に合否を判定します
+                  </p>
+                </div>
+                <button
+                  onClick={openExamSetup}
+                  className="rounded-xl bg-blue-600 px-6 py-3 font-black text-white"
+                >
+                  新しい試験を開始
+                </button>
+              </div>
+              <div className="mt-7 grid grid-cols-3 gap-3">
+                <div className="rounded-xl bg-gray-50 p-4">
+                  <p className="text-xs text-gray-500">受験</p>
+                  <p className="text-2xl font-black">{examAttempts.length}回</p>
+                </div>
+                <div className="rounded-xl bg-gray-50 p-4">
+                  <p className="text-xs text-gray-500">合格</p>
+                  <p className="text-2xl font-black">
+                    {examAttempts.filter((a) => a.passed).length}回
+                  </p>
+                </div>
+                <div className="rounded-xl bg-gray-50 p-4">
+                  <p className="text-xs text-gray-500">最新</p>
+                  <p className="text-2xl font-black">
+                    {latestExam?.percentage ?? "—"}{latestExam ? "%" : ""}
+                  </p>
+                </div>
+              </div>
+              <div className="mt-7 space-y-3">
+                {examAttempts.map((attempt) => (
+                  <button
+                    key={attempt.id}
+                    onClick={() => {
+                      setExpandedAttempt(attempt.id);
+                      setView("history");
+                    }}
+                    className="w-full rounded-xl border p-4 text-left"
+                  >
+                    <span className="font-bold">
+                      {attempt.subjectNames?.join("・") || "試験"}
+                    </span>
+                    <span className="float-right font-black text-blue-700">
+                      {attempt.status === "interrupted"
+                        ? "途中中断"
+                        : `${attempt.percentage ?? 0}%・${attempt.passed ? "合格" : "不合格"}`}
+                    </span>
+                    <span className="mt-1 block text-xs text-gray-500">
+                      {attempt.date}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+        {view === "history" && (
+          <>
+            <button onClick={() => setView("home")} className="mb-5 text-gray-500">
+              ← 学習ライブラリ
+            </button>
+            <div className="card p-6 md:p-8">
+              <h1 className="text-3xl font-black">すべての結果</h1>
+              <p className="mt-1 text-gray-500">
+                通常学習と試験の履歴を新しい順に表示しています
+              </p>
+              <div className="mt-6 space-y-3">
+                {attempts.map((attempt) => {
+                  const rate =
+                    attempt.percentage ??
+                    (attempt.total
+                      ? Math.round((attempt.score / attempt.total) * 100)
+                      : null);
+                  return (
+                    <div key={attempt.id} className="overflow-hidden rounded-xl border">
+                      <button
+                        onClick={() =>
+                          setExpandedAttempt(
+                            expandedAttempt === attempt.id ? null : attempt.id,
+                          )
+                        }
+                        className="w-full p-4 text-left"
+                      >
+                        <span className="font-bold">
+                          {attempt.subjectNames?.join("・") ||
+                            subjects.find((s) => s.id === attempt.subjectId)?.name ||
+                            "削除済みの科目"}
+                        </span>
+                        <span className="float-right font-black text-blue-700">
+                          {rate === null
+                            ? "論述のみ"
+                            : `${attempt.score}/${attempt.total}（${rate}%）`}
+                        </span>
+                        <span className="mt-1 block text-xs text-gray-500">
+                          {attempt.mode === "exam" ? "試験" : "通常学習"}・
+                          {attempt.date}
+                          {attempt.status === "interrupted" && "・途中中断"}
+                        </span>
+                      </button>
+                      {expandedAttempt === attempt.id && (
+                        <div className="border-t p-4">
+                          <AnswerReviewList
+                            answers={attempt.answers}
+                            subjects={subjects}
+                            fallbackSubjectId={attempt.subjectId}
+                            showSubject
+                          />
+                          <button
+                            onClick={() => deleteAttempt(attempt)}
+                            className="mt-4 text-sm font-bold text-red-600"
+                          >
+                            この結果を削除
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {!attempts.length && (
+                  <p className="py-10 text-center text-gray-500">結果はまだありません</p>
+                )}
+              </div>
+            </div>
           </>
         )}
         {view === "subject" && subject && (
@@ -1105,7 +1383,7 @@ export default function Home() {
                           <span className="text-right">
                             <b className="text-blue-700 text-lg">
                               {a.total > 0
-                                ? `${a.score}/${a.total}`
+                                ? `${a.score}/${a.total}（${Math.round((a.score / a.total) * 100)}%）`
                                 : "論述のみ"}
                             </b>
                             <span className="block text-xs text-gray-500">
@@ -1431,6 +1709,39 @@ export default function Home() {
                 />
               </label>
               <label className="block font-bold">
+                授業科目・フォルダ
+                <input
+                  value={subjectSettings.folder || ""}
+                  onChange={(e) =>
+                    setSubjectSettings({
+                      ...subjectSettings,
+                      folder: e.target.value,
+                    })
+                  }
+                  placeholder="例：消費者行動論Ⅰ"
+                  className="mt-2 mb-4 block w-full rounded-lg border p-3 font-normal"
+                />
+              </label>
+              <label className="mb-5 flex items-start gap-3 rounded-xl bg-gray-50 p-4">
+                <input
+                  type="checkbox"
+                  checked={Boolean(subjectSettings.archived)}
+                  onChange={(e) =>
+                    setSubjectSettings({
+                      ...subjectSettings,
+                      archived: e.target.checked,
+                    })
+                  }
+                  className="mt-1"
+                />
+                <span>
+                  <b className="block">一覧で非表示にする</b>
+                  <span className="text-sm font-normal text-gray-500">
+                    削除せず保管し、通常の一覧と出題対象から外します
+                  </span>
+                </span>
+              </label>
+              <label className="block font-bold">
                 CSV URL
                 <textarea
                   value={subjectSettings.source?.url || ""}
@@ -1668,14 +1979,16 @@ export default function Home() {
         {showExamSetup && (
           <div className="fixed inset-0 z-30 grid place-items-center overflow-y-auto bg-black/50 p-4">
             <div className="card my-6 max-h-[92vh] w-full max-w-2xl overflow-y-auto p-6">
-              <h2 className="text-2xl font-black">試験設定</h2>
+              <h2 className="text-2xl font-black">
+                {setupMode === "exam" ? "試験設定" : "横断学習設定"}
+              </h2>
               <p className="mt-1 text-gray-500">
-                複数の科目・授業回をまとめて出題できます
+                複数の問題セット・授業回をまとめて出題できます
               </p>
 
               <p className="mb-3 mt-6 font-bold">出題する科目</p>
               <div className="grid gap-3 sm:grid-cols-2">
-                {subjects.map((item) => {
+                {subjects.filter((item) => !item.archived).map((item) => {
                   const checked = examSubjectIds.includes(item.id);
                   return (
                     <button
@@ -1764,11 +2077,11 @@ export default function Home() {
                   />
                 </label>
                 <label className="font-bold">
-                  合格基準
+                  {setupMode === "exam" ? "合格基準" : "出題方法"}
                   <span className="ml-2 text-sm font-normal text-gray-500">
-                    デフォルト90%
+                    {setupMode === "exam" ? "デフォルト90%" : ""}
                   </span>
-                  <div className="mt-2 flex items-center gap-2">
+                  {setupMode === "exam" ? <div className="mt-2 flex items-center gap-2">
                     <input
                       type="number"
                       min="1"
@@ -1780,13 +2093,16 @@ export default function Home() {
                       className="block w-full rounded-lg border p-3"
                     />
                     <span className="font-black">%</span>
-                  </div>
+                  </div> : <span className="mt-2 block rounded-lg bg-blue-50 p-3 text-sm font-normal text-blue-800">
+                    未回答・回答回数の少ない問題も含めてランダム出題します
+                  </span>}
                 </label>
               </div>
 
               <div className="mt-5 rounded-xl bg-blue-50 p-4 text-sm text-blue-800">
-                途中では正誤と解説を表示しません。論述問題を含む場合は、
-                AI採点結果を取り込むまで最終合否は「採点待ち」になります。
+                {setupMode === "exam"
+                  ? "途中では正誤と解説を表示しません。論述問題を含む場合は、AI採点結果を取り込むまで最終合否は「採点待ち」になります。"
+                  : "通常学習と同じく、回答ごとに正誤と解説を確認できます。"}
               </div>
               <div className="mt-6 flex justify-end gap-3">
                 <button onClick={() => setShowExamSetup(false)}>
@@ -1794,14 +2110,14 @@ export default function Home() {
                 </button>
                 <button
                   onClick={() =>
-                    runWithLoading("試験問題を準備しています…", async () => {
+                    runWithLoading("問題を準備しています…", async () => {
                       startExam();
                     })
                   }
                   disabled={!examAvailable}
                   className="rounded-xl bg-blue-600 px-6 py-3 font-bold text-white disabled:bg-gray-300"
                 >
-                  試験を開始
+                  {setupMode === "exam" ? "試験を開始" : "横断学習を開始"}
                 </button>
               </div>
             </div>

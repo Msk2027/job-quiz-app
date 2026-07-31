@@ -15,6 +15,10 @@ export type Subject = {
   id: string;
   name: string;
   color: string;
+  /** 授業科目・講義など、複数の問題セットをまとめるフォルダ名 */
+  folder?: string;
+  /** 終了した科目を削除せず一覧から隠す */
+  archived?: boolean;
   source?: { url: string; mode: "sync" | "copy" };
   questions: Question[];
 };

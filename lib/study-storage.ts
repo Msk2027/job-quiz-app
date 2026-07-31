@@ -55,6 +55,8 @@ type SubjectRow = {
   id: string;
   name: string;
   color: string;
+  folder_name: string | null;
+  archived: boolean | null;
   source: Subject["source"] | null;
   position: number;
 };
@@ -161,7 +163,7 @@ export async function loadRelationalData(
         .maybeSingle(),
       client
         .from("study_subjects")
-        .select("id, name, color, source, position")
+        .select("id, name, color, folder_name, archived, source, position")
         .eq("user_id", userId)
         .order("position"),
       client
@@ -236,6 +238,8 @@ export async function loadRelationalData(
         id: row.id,
         name: row.name,
         color: row.color,
+        ...(row.folder_name ? { folder: row.folder_name } : {}),
+        ...(row.archived ? { archived: true } : {}),
         ...(row.source ? { source: row.source } : {}),
         questions: questionsBySubject.get(row.id) || [],
       }),

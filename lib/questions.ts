@@ -97,3 +97,32 @@ export async function loadSheet(url: string) {
     );
   return questions;
 }
+
+export async function loadQuestionFile(file: File) {
+  let rows: Record<string, string>[];
+  if (/\.xlsx?$/i.test(file.name)) {
+    const XLSX = await import("xlsx");
+    const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    rows = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, {
+      defval: "",
+    });
+  } else {
+    const { default: Papa } = await import("papaparse");
+    const parsed = Papa.parse<Record<string, string>>(await file.text(), {
+      header: true,
+      skipEmptyLines: true,
+    });
+    const fatalError = parsed.errors.find(
+      (error) => error.code !== "TooFewFields" && error.code !== "TooManyFields",
+    );
+    if (fatalError) throw new Error(fatalError.message);
+    rows = parsed.data;
+  }
+  const questions = dedupeQuestions(
+    rows.map(rowToQuestion).filter((q): q is Question => !!q),
+  );
+  if (!questions.length)
+    throw new Error("「question」または「問題文」列が見つかりません");
+  return questions;
+}
