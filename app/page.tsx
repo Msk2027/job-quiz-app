@@ -1,5 +1,5 @@
 "use client";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AnswerBreakdown, AnswerReviewList } from "@/components/answer-review";
 import { AuthScreen } from "@/components/auth-screen";
 import { DataHealth } from "@/components/data-health";
@@ -119,7 +119,40 @@ export default function Home() {
   const [newFolderName, setNewFolderName] = useState("");
   const [folderSubjectIds, setFolderSubjectIds] = useState<string[]>([]);
   const [closedFolders, setClosedFolders] = useState<string[]>([]);
+  const [folderPreferencesReady, setFolderPreferencesReady] = useState(false);
   const bulkInputRef = useRef<HTMLInputElement>(null);
+  const folderPreferencesKey = `study_closed_folders_v1:${session?.user.id || "local"}`;
+
+  useEffect(() => {
+    if (!authChecked) return;
+    const timer = window.setTimeout(() => {
+      try {
+        const stored = window.localStorage.getItem(folderPreferencesKey);
+        const parsed = stored ? JSON.parse(stored) : [];
+        setClosedFolders(
+          Array.isArray(parsed)
+            ? parsed.filter((item): item is string => typeof item === "string")
+            : [],
+        );
+      } catch {
+        setClosedFolders([]);
+      }
+      setFolderPreferencesReady(true);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [authChecked, folderPreferencesKey]);
+
+  useEffect(() => {
+    if (!folderPreferencesReady) return;
+    try {
+      window.localStorage.setItem(
+        folderPreferencesKey,
+        JSON.stringify(closedFolders),
+      );
+    } catch {
+      // 表示設定の保存失敗は学習データの保存には影響させない。
+    }
+  }, [closedFolders, folderPreferencesKey, folderPreferencesReady]);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
     () =>
@@ -921,14 +954,8 @@ export default function Home() {
       <div className="max-w-5xl mx-auto p-4 md:p-8">
         {view === "home" && (
           <>
-            <div className="flex justify-between items-end mb-6">
-              <div>
-                <h1 className="text-3xl font-black">学習ライブラリ</h1>
-                <p className="text-gray-500 mt-1">
-                  授業科目ごとに問題セットを整理できます
-                </p>
-              </div>
-              <div className="flex flex-wrap justify-end gap-2">
+            <div className="mb-6">
+              <div className="grid w-full gap-2 sm:grid-cols-3">
                 <input
                   ref={bulkInputRef}
                   type="file"
@@ -942,7 +969,7 @@ export default function Home() {
                 />
                 <button
                   onClick={() => bulkInputRef.current?.click()}
-                  className="h-12 min-w-44 rounded-xl border border-blue-600 px-4 font-bold text-blue-700"
+                  className="h-12 w-full rounded-xl border border-blue-600 px-4 font-bold text-blue-700"
                 >
                   複数ファイルを一括追加
                 </button>
@@ -957,13 +984,13 @@ export default function Home() {
                     setFolderSubjectIds([]);
                     setShowFolderCreator(true);
                   }}
-                  className="h-12 min-w-44 rounded-xl border border-blue-600 px-4 font-bold text-blue-700"
+                  className="h-12 w-full rounded-xl border border-blue-600 px-4 font-bold text-blue-700"
                 >
                   ＋ フォルダを作成
                 </button>
                 <button
                   onClick={addSubject}
-                  className="h-12 min-w-44 rounded-xl bg-blue-600 px-5 font-bold text-white"
+                  className="h-12 w-full rounded-xl bg-blue-600 px-5 font-bold text-white"
                 >
                   ＋ 問題セットを追加
                 </button>
@@ -1234,7 +1261,7 @@ export default function Home() {
                       >
                         <div className="flex justify-between gap-3">
                           <h3 className="text-xl font-black">{s.name}</h3>
-                          <span className="whitespace-nowrap rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-700">
+                          <span className="inline-flex min-w-16 shrink-0 items-center justify-center whitespace-nowrap rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-700">
                             {s.questions.length}問
                           </span>
                         </div>

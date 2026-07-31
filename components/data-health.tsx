@@ -124,9 +124,12 @@ export function DataHealth({
 
   return (
     <section className="card mt-6 p-5 md:p-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="font-black">データの保存状況とバックアップ</h3>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <h3 className="font-black">
+            <span className="sm:hidden">保存・バックアップ</span>
+            <span className="hidden sm:inline">データの保存状況とバックアップ</span>
+          </h3>
           <p className="mt-1 text-sm text-gray-500">
             {!diagnostics.supabaseConfigured
               ? "クラウド同期が無効です。端末内だけに保存されています。"
@@ -137,7 +140,7 @@ export function DataHealth({
         </div>
         <button
           onClick={() => setOpen((current) => !current)}
-          className="rounded-xl border px-4 py-2 font-bold"
+          className="h-11 w-full rounded-xl border px-4 font-bold sm:w-auto sm:min-w-36"
         >
           {open ? "閉じる ▲" : "詳細を見る ▼"}
         </button>
@@ -148,29 +151,29 @@ export function DataHealth({
             {rows.map((row) => (
               <div
                 key={row.label}
-                className={`flex flex-wrap justify-between gap-2 rounded-xl border px-4 py-3 text-sm ${
+                className={`flex flex-col gap-1 rounded-xl border px-4 py-3 text-sm sm:flex-row sm:justify-between sm:gap-2 ${
                   row.warn ? "border-amber-300 bg-amber-50" : ""
                 }`}
               >
                 <dt className="font-bold">{row.label}</dt>
                 <dd
-                  className={`text-right ${row.warn ? "font-bold text-amber-800" : "text-gray-600"}`}
+                  className={`break-words text-left sm:text-right ${row.warn ? "font-bold text-amber-800" : "text-gray-600"}`}
                 >
                   {row.value}
                 </dd>
               </div>
             ))}
           </dl>
-          <div className="mt-5 flex flex-wrap gap-3">
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <button
               onClick={download}
-              className="rounded-xl bg-blue-600 px-5 py-3 font-bold text-white"
+              className="h-12 w-full rounded-xl bg-blue-600 px-5 font-bold text-white"
             >
               バックアップをダウンロード
             </button>
             <button
               onClick={() => fileInput.current?.click()}
-              className="rounded-xl border border-blue-600 px-5 py-3 font-bold text-blue-700"
+              className="h-12 w-full rounded-xl border border-blue-600 px-5 font-bold text-blue-700"
             >
               バックアップから復元
             </button>
@@ -203,7 +206,7 @@ export function DataHealth({
                   }
                 }}
                 disabled={saving}
-                className="rounded-xl border px-5 py-3 font-bold disabled:opacity-50"
+                className="h-12 w-full rounded-xl border px-5 font-bold disabled:opacity-50"
               >
                 {saving ? "保存中…" : "今すぐクラウドに保存"}
               </button>
