@@ -20,6 +20,10 @@ export type Subject = {
   /** 終了した科目を削除せず一覧から隠す */
   archived?: boolean;
   source?: { url: string; mode: "sync" | "copy" };
+  /** 一覧表示用。問題本文を未取得でも件数を表示する。 */
+  questionCount?: number;
+  /** falseの場合、questionsはまだクラウドから取得していない。 */
+  questionsLoaded?: boolean;
   questions: Question[];
 };
 
@@ -62,6 +66,8 @@ export type Attempt = {
   essayPending?: boolean;
   timeLimitMinutes?: number | null;
   answers: AnswerRecord[];
+  /** falseの場合、answersは結果を展開したときに取得する。 */
+  answersLoaded?: boolean;
   status?: "completed" | "interrupted";
 };
 

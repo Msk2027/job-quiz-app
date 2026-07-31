@@ -18,11 +18,13 @@ const statusLabel: Record<SyncDiagnostics["status"], string> = {
 export function DataHealth({
   diagnostics,
   snapshot,
+  onBuildBackup,
   onSaveNow,
   onRestore,
 }: {
   diagnostics: SyncDiagnostics;
   snapshot: StudySnapshot;
+  onBuildBackup?: () => Promise<StudySnapshot>;
   onSaveNow: () => Promise<unknown>;
   onRestore: (snapshot: StudySnapshot) => Promise<unknown>;
 }) {
@@ -31,8 +33,10 @@ export function DataHealth({
   const fileInput = useRef<HTMLInputElement>(null);
   const cloudActive = diagnostics.supabaseConfigured && diagnostics.signedIn;
 
-  function download() {
-    const payload = buildBackup(snapshot);
+  async function download() {
+    setSaving(true);
+    try {
+    const payload = buildBackup(onBuildBackup ? await onBuildBackup() : snapshot);
     const blob = new Blob([JSON.stringify(payload, null, 2)], {
       type: "application/json",
     });
@@ -45,6 +49,15 @@ export function DataHealth({
       .replace(/[:T]/g, "")}.json`;
     link.click();
     URL.revokeObjectURL(url);
+    } catch (error) {
+      alert(
+        `バックアップを作成できませんでした：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      setSaving(false);
+    }
   }
 
   async function restore(file: File) {
@@ -166,10 +179,11 @@ export function DataHealth({
           </dl>
           <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <button
-              onClick={download}
-              className="h-12 w-full rounded-xl bg-blue-600 px-5 font-bold text-white"
+              onClick={() => void download()}
+              disabled={saving}
+              className="h-12 w-full rounded-xl bg-blue-600 px-5 font-bold text-white disabled:opacity-50"
             >
-              バックアップをダウンロード
+              {saving ? "準備中…" : "バックアップをダウンロード"}
             </button>
             <button
               onClick={() => fileInput.current?.click()}

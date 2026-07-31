@@ -115,7 +115,10 @@ export function writeSnapshotKeys(
 }
 
 export const countQuestions = (subjects: Subject[]) =>
-  subjects.reduce((total, subject) => total + subject.questions.length, 0);
+  subjects.reduce(
+    (total, subject) => total + (subject.questionCount ?? subject.questions.length),
+    0,
+  );
 
 export const snapshotSize = (snapshot: StudySnapshot) =>
   snapshot.subjects.length + snapshot.attempts.length;

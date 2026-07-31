@@ -241,6 +241,8 @@ export async function loadRelationalData(
         ...(row.folder_name ? { folder: row.folder_name } : {}),
         ...(row.archived ? { archived: true } : {}),
         ...(row.source ? { source: row.source } : {}),
+        questionCount: (questionsBySubject.get(row.id) || []).length,
+        questionsLoaded: true,
         questions: questionsBySubject.get(row.id) || [],
       }),
     );
@@ -251,6 +253,7 @@ export async function loadRelationalData(
         date: row.display_date,
         score: row.score,
         total: row.total,
+        answersLoaded: true,
         answers: answersByAttempt.get(row.id) || [],
         ...(row.subject_ids ? { subjectIds: row.subject_ids } : {}),
         ...(row.subject_names ? { subjectNames: row.subject_names } : {}),
@@ -292,6 +295,156 @@ export async function loadRelationalData(
   }
 }
 
+/** ホーム・履歴用。問題本文と解答詳細を送らず、一覧に必要な情報だけ取得する。 */
+export async function loadRelationalOverview(
+  client: SupabaseClient,
+  userId: string,
+): Promise<StorageResult> {
+  try {
+    const [stateResult, subjectsResult, questionIdsResult, attemptsResult] =
+      await Promise.all([
+        client
+          .from("study_storage_state")
+          .select("updated_at")
+          .eq("user_id", userId)
+          .maybeSingle(),
+        client
+          .from("study_subjects")
+          .select("id, name, color, folder_name, archived, source, position")
+          .eq("user_id", userId)
+          .order("position"),
+        client
+          .from("study_questions")
+          .select("subject_id")
+          .eq("user_id", userId),
+        client
+          .from("study_attempts")
+          .select(
+            "id, subject_id, subject_ids, subject_names, display_date, score, total, mode, status, pass_percentage, percentage, passed, essay_pending, time_limit_minutes, position",
+          )
+          .eq("user_id", userId)
+          .order("position"),
+      ]);
+
+    throwIfError(stateResult.error);
+    throwIfError(subjectsResult.error);
+    throwIfError(questionIdsResult.error);
+    throwIfError(attemptsResult.error);
+
+    const counts = new Map<string, number>();
+    ((questionIdsResult.data || []) as { subject_id: string }[]).forEach(
+      ({ subject_id }) => counts.set(subject_id, (counts.get(subject_id) || 0) + 1),
+    );
+    const subjects = ((subjectsResult.data || []) as SubjectRow[]).map((row) => ({
+      id: row.id,
+      name: row.name,
+      color: row.color,
+      ...(row.folder_name ? { folder: row.folder_name } : {}),
+      ...(row.archived ? { archived: true } : {}),
+      ...(row.source ? { source: row.source } : {}),
+      questionCount: counts.get(row.id) || 0,
+      questionsLoaded: false,
+      questions: [],
+    }));
+    const attempts = ((attemptsResult.data || []) as AttemptRow[]).map((row) => ({
+      id: row.id,
+      subjectId: row.subject_id,
+      date: row.display_date,
+      score: row.score,
+      total: row.total,
+      answersLoaded: false,
+      answers: [],
+      ...(row.subject_ids ? { subjectIds: row.subject_ids } : {}),
+      ...(row.subject_names ? { subjectNames: row.subject_names } : {}),
+      ...(row.mode ? { mode: row.mode } : {}),
+      ...(row.status ? { status: row.status } : {}),
+      ...(row.pass_percentage !== null
+        ? { passPercentage: Number(row.pass_percentage) }
+        : {}),
+      ...(row.percentage !== null ? { percentage: Number(row.percentage) } : {}),
+      ...(row.passed !== null ? { passed: row.passed } : {}),
+      ...(row.essay_pending !== null ? { essayPending: row.essay_pending } : {}),
+      ...(row.time_limit_minutes !== null
+        ? { timeLimitMinutes: row.time_limit_minutes }
+        : {}),
+    }));
+
+    return {
+      available: true,
+      subjects,
+      attempts,
+      deletions: await loadDeletions(client, userId),
+      updatedAt: stateResult.data?.updated_at
+        ? Date.parse(String(stateResult.data.updated_at))
+        : 0,
+    };
+  } catch (error) {
+    return {
+      available: false,
+      subjects: [],
+      attempts: [],
+      updatedAt: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+export async function loadSubjectQuestions(
+  client: SupabaseClient,
+  userId: string,
+  subjectId: string,
+): Promise<Question[]> {
+  const { data, error } = await client
+    .from("study_questions")
+    .select(
+      "subject_id, id, question_type, question, options, answer, explanation, model_answer, rubric, position",
+    )
+    .eq("user_id", userId)
+    .eq("subject_id", subjectId)
+    .order("position");
+  throwIfError(error);
+  return ((data || []) as QuestionRow[]).map((row) => ({
+    id: row.id,
+    type: row.question_type,
+    question: row.question,
+    options: Array.isArray(row.options) ? row.options : [],
+    answer: row.answer,
+    explanation: row.explanation,
+    modelAnswer: row.model_answer,
+    rubric: row.rubric,
+  }));
+}
+
+export async function loadAttemptAnswers(
+  client: SupabaseClient,
+  userId: string,
+  attemptId: string,
+): Promise<AnswerRecord[]> {
+  const { data, error } = await client
+    .from("study_answers")
+    .select(
+      "attempt_id, answer_index, question_id, subject_id, subject_name, question, question_type, answer, correct, correct_answer, explanation, model_answer, rubric, grading",
+    )
+    .eq("user_id", userId)
+    .eq("attempt_id", attemptId)
+    .order("answer_index");
+  throwIfError(error);
+  return ((data || []) as AnswerRow[]).map((row) => ({
+    questionId: row.question_id,
+    answer: row.answer,
+    correct: row.correct,
+    ...(row.subject_id ? { subjectId: row.subject_id } : {}),
+    ...(row.subject_name ? { subjectName: row.subject_name } : {}),
+    ...(row.question ? { question: row.question } : {}),
+    ...(row.question_type ? { type: row.question_type } : {}),
+    ...(row.correct_answer ? { correctAnswer: row.correct_answer } : {}),
+    ...(row.explanation ? { explanation: row.explanation } : {}),
+    ...(row.model_answer ? { modelAnswer: row.model_answer } : {}),
+    ...(row.rubric ? { rubric: row.rubric } : {}),
+    ...(row.grading ? { grading: row.grading } : {}),
+  }));
+}
+
 const serialized = (value: unknown) => JSON.stringify(value);
 
 const subjectMetadata = (subject: Subject, position: number) => ({
@@ -305,8 +458,9 @@ const subjectMetadata = (subject: Subject, position: number) => ({
 });
 
 const attemptMetadata = (attempt: Attempt, position: number) => {
-  const { answers: _, ...metadata } = attempt;
+  const { answers: _, answersLoaded: __, ...metadata } = attempt;
   void _;
+  void __;
   return { ...metadata, position };
 };
 

@@ -37,7 +37,10 @@ import {
 import { dedupeQuestions } from "@/lib/questions";
 import {
   loadLegacyData,
+  loadAttemptAnswers,
+  loadRelationalOverview,
   loadRelationalData,
+  loadSubjectQuestions,
   saveLegacyBackup,
   saveRelationalChanges,
   type Deletions,
@@ -109,7 +112,46 @@ const readSyncedIds = (userId: string): SyncedIds => {
 const errorMessage = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
-export function useStudySync() {
+const overviewSnapshot = (snapshot: StudySnapshot): StudySnapshot => ({
+  subjects: snapshot.subjects.map((subject) => ({
+    ...subject,
+    questionCount: subject.questionCount ?? subject.questions.length,
+    questionsLoaded: false,
+    questions: [],
+  })),
+  attempts: snapshot.attempts.map((attempt) => ({
+    ...attempt,
+    answersLoaded: false,
+    answers: [],
+  })),
+});
+
+const preserveUnloadedDetails = (
+  snapshot: StudySnapshot,
+  stored: StudySnapshot,
+): StudySnapshot => {
+  const storedSubjects = new Map(stored.subjects.map((item) => [item.id, item]));
+  const storedAttempts = new Map(stored.attempts.map((item) => [item.id, item]));
+  return {
+    subjects: snapshot.subjects.map((subject) => {
+      const previous = storedSubjects.get(subject.id);
+      if (subject.questionsLoaded !== false || !previous) return subject;
+      return {
+        ...subject,
+        questionCount: subject.questionCount ?? previous.questions.length,
+        questionsLoaded: true,
+        questions: previous.questions,
+      };
+    }),
+    attempts: snapshot.attempts.map((attempt) => {
+      const previous = storedAttempts.get(attempt.id);
+      if (attempt.answersLoaded !== false || !previous) return attempt;
+      return { ...attempt, answersLoaded: true, answers: previous.answers };
+    }),
+  };
+};
+
+export function useStudySync({ overviewOnly = false } = {}) {
   const [ready, setReady] = useState(false);
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
@@ -162,7 +204,10 @@ export function useStudySync() {
       intent: "user" | "mirror",
       updatedAt = Date.now(),
     ) => {
-      const empty = isEmptySnapshot(snapshot);
+      const persistedSnapshot = overviewOnly
+        ? preserveUnloadedDetails(snapshot, readCache(userId))
+        : snapshot;
+      const empty = isEmptySnapshot(persistedSnapshot);
       if (userId) {
         if (intent === "mirror" && empty && !isEmptySnapshot(readCache(userId)))
           return true;
@@ -170,20 +215,20 @@ export function useStudySync() {
           writeSnapshotKeys(
             userKey(SUBJECTS_KEY, userId),
             userKey(ATTEMPTS_KEY, userId),
-            snapshot,
+            persistedSnapshot,
           ) && writeRaw(userKey(CACHE_UPDATED_KEY, userId), String(updatedAt));
-        if (intent === "user" || !empty) writeBackup(userId, snapshot);
+        if (intent === "user" || !empty) writeBackup(userId, persistedSnapshot);
         return ok;
       }
       // ログインしていない状態では端末内保存のみで動かす
       if (isSupabaseConfigured) return true;
       if (intent === "mirror" && empty && !isEmptySnapshot(readCache()))
         return true;
-      const ok = writeSnapshotKeys(SUBJECTS_KEY, ATTEMPTS_KEY, snapshot);
-      if (intent === "user" || !empty) writeBackup(undefined, snapshot);
+      const ok = writeSnapshotKeys(SUBJECTS_KEY, ATTEMPTS_KEY, persistedSnapshot);
+      if (intent === "user" || !empty) writeBackup(undefined, persistedSnapshot);
       return ok;
     },
-    [],
+    [overviewOnly],
   );
 
   const markDirty = useCallback((userId: string) => {
@@ -240,12 +285,13 @@ export function useStudySync() {
       const snapshot = isEmptySnapshot(cached)
         ? (readBackup() ?? cached)
         : cached;
-      setSubjects(dedupeSubjects(snapshot.subjects));
-      setAttempts(snapshot.attempts);
+      const visible = overviewOnly ? overviewSnapshot(snapshot) : snapshot;
+      setSubjects(dedupeSubjects(visible.subjects));
+      setAttempts(visible.attempts);
       setReady(true);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, []);
+  }, [overviewOnly]);
 
   useEffect(() => {
     if (!ready) return;
@@ -328,6 +374,7 @@ export function useStudySync() {
         );
         if (isEmptySnapshot(cached))
           cached = normalize(readBackup(userId) ?? cached);
+        if (overviewOnly) cached = overviewSnapshot(cached);
         cacheLoadedForUser.current = userId;
         subjectsRef.current = cached.subjects;
         attemptsRef.current = cached.attempts;
@@ -343,19 +390,23 @@ export function useStudySync() {
       const hasUnsyncedCache =
         readRaw(userKey(CACHE_DIRTY_KEY, userId)) === "1";
 
-      const [legacy, relational] = await Promise.all([
-        loadLegacyData(client, userId),
-        forceLegacyStorage
-          ? Promise.resolve({
-              available: false,
-              subjects: [] as Subject[],
-              attempts: [] as Attempt[],
-              updatedAt: 0,
-              error: undefined as string | undefined,
-              deletions: null as Deletions | null,
-            })
-          : loadRelationalData(client, userId),
-      ]);
+      const unavailableRelational = {
+        available: false,
+        subjects: [] as Subject[],
+        attempts: [] as Attempt[],
+        updatedAt: 0,
+        error: undefined as string | undefined,
+        deletions: null as Deletions | null,
+      };
+      const relational = forceLegacyStorage
+        ? unavailableRelational
+        : await (overviewOnly
+            ? loadRelationalOverview(client, userId)
+            : loadRelationalData(client, userId));
+      // 正規化テーブルが利用できる場合、巨大なuser_dataバックアップは読まない。
+      const legacy = relational.available
+        ? unavailableRelational
+        : await loadLegacyData(client, userId);
       if (!active) return;
 
       if (!legacy.available && !relational.available) {
@@ -377,6 +428,7 @@ export function useStudySync() {
           ? { subjects: relational.subjects, attempts: relational.attempts }
           : { subjects: legacy.subjects, attempts: legacy.attempts },
       );
+      if (overviewOnly && useRelational) remote = overviewSnapshot(remote);
       let remoteUpdatedAt = useRelational
         ? relational.updatedAt
         : legacy.updatedAt;
@@ -425,6 +477,7 @@ export function useStudySync() {
           remote,
           next,
           storageMode.current === "relational",
+          !overviewOnly,
         );
         if (!active) return;
         remote = next;
@@ -466,7 +519,14 @@ export function useStudySync() {
     return () => {
       active = false;
     };
-  }, [ready, sessionUserId, syncRetry, clearDirty, writeLocalSnapshot]);
+  }, [
+    ready,
+    sessionUserId,
+    syncRetry,
+    clearDirty,
+    writeLocalSnapshot,
+    overviewOnly,
+  ]);
 
   const persistSnapshot = useCallback(
     (nextSnapshot: StudySnapshot) => {
@@ -489,6 +549,7 @@ export function useStudySync() {
             previousSnapshot,
             nextSnapshot,
             storageMode.current === "relational",
+            !overviewOnly,
           );
         } catch (error) {
           setLastError(errorMessage(error));
@@ -515,7 +576,7 @@ export function useStudySync() {
       saveQueue.current = operation.catch(() => undefined);
       return operation;
     },
-    [sessionUserId, cloudReady, clearDirty],
+    [sessionUserId, cloudReady, clearDirty, overviewOnly],
   );
 
   useEffect(() => {
@@ -541,6 +602,76 @@ export function useStudySync() {
       ),
     [persistSnapshot],
   );
+
+  const ensureSubjectQuestions = useCallback(
+    async (subjectId: string) => {
+      const current = subjectsRef.current.find((item) => item.id === subjectId);
+      if (!current || current.questionsLoaded !== false) return current?.questions || [];
+      if (!supabase || !sessionUserId)
+        throw new Error("クラウドから問題を取得できません");
+      const questions = await loadSubjectQuestions(supabase, sessionUserId, subjectId);
+      const nextSubjects = subjectsRef.current.map((item) =>
+        item.id === subjectId
+          ? {
+              ...item,
+              questions,
+              questionCount: questions.length,
+              questionsLoaded: true,
+            }
+          : item,
+      );
+      subjectsRef.current = nextSubjects;
+      lastSyncedSnapshot.current = {
+        subjects: nextSubjects,
+        attempts: attemptsRef.current,
+      };
+      lastSyncedData.current = serialize(nextSubjects, attemptsRef.current);
+      setSubjects(nextSubjects);
+      writeLocalSnapshot(
+        sessionUserId,
+        { subjects: nextSubjects, attempts: attemptsRef.current },
+        "mirror",
+      );
+      return questions;
+    },
+    [sessionUserId, writeLocalSnapshot],
+  );
+
+  const ensureAttemptAnswers = useCallback(
+    async (attemptId: string) => {
+      const current = attemptsRef.current.find((item) => item.id === attemptId);
+      if (!current || current.answersLoaded !== false) return current?.answers || [];
+      if (!supabase || !sessionUserId)
+        throw new Error("クラウドから解答詳細を取得できません");
+      const answers = await loadAttemptAnswers(supabase, sessionUserId, attemptId);
+      const nextAttempts = attemptsRef.current.map((item) =>
+        item.id === attemptId ? { ...item, answers, answersLoaded: true } : item,
+      );
+      attemptsRef.current = nextAttempts;
+      lastSyncedSnapshot.current = {
+        subjects: subjectsRef.current,
+        attempts: nextAttempts,
+      };
+      lastSyncedData.current = serialize(subjectsRef.current, nextAttempts);
+      setAttempts(nextAttempts);
+      writeLocalSnapshot(
+        sessionUserId,
+        { subjects: subjectsRef.current, attempts: nextAttempts },
+        "mirror",
+      );
+      return answers;
+    },
+    [sessionUserId, writeLocalSnapshot],
+  );
+
+  const getCompleteSnapshot = useCallback(async (): Promise<StudySnapshot> => {
+    if (supabase && sessionUserId && storageMode.current === "relational") {
+      const complete = await loadRelationalData(supabase, sessionUserId);
+      if (complete.available)
+        return { subjects: complete.subjects, attempts: complete.attempts };
+    }
+    return readCache(sessionUserId);
+  }, [sessionUserId]);
 
   // アプリを閉じる・タブを切り替えるときに、未送信の変更を送り出す
   useEffect(() => {
@@ -646,6 +777,9 @@ export function useStudySync() {
     retrySync,
     signOut,
     restoreSnapshot,
+    ensureSubjectQuestions,
+    ensureAttemptAnswers,
+    getCompleteSnapshot,
     diagnostics,
   };
 }
@@ -661,6 +795,7 @@ async function uploadSnapshot(
   previous: StudySnapshot,
   next: StudySnapshot,
   useRelational: boolean,
+  updateLegacyBackup = true,
 ) {
   const updatedAt = new Date().toISOString();
   let relationalError: unknown = null;
@@ -674,6 +809,10 @@ async function uploadSnapshot(
   const legacyAt = relationalError
     ? new Date(Date.now() + 1000).toISOString()
     : updatedAt;
-  await saveLegacyBackup(client, userId, next, legacyAt);
+  // 部分読み込み中のsnapshotを完全バックアップへ書くと、未取得の詳細が
+  // 空データとして保存される。RPC未適用時は端末側を保持して同期エラーにする。
+  if (relationalError && !updateLegacyBackup) throw relationalError;
+  if (updateLegacyBackup || relationalError)
+    await saveLegacyBackup(client, userId, next, legacyAt);
   return Date.parse(legacyAt);
 }

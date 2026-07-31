@@ -82,8 +82,13 @@ export function StudyApp({
     retrySync,
     signOut: signOutCloud,
     restoreSnapshot,
+    ensureSubjectQuestions,
+    ensureAttemptAnswers,
+    getCompleteSnapshot,
     diagnostics,
-  } = useStudySync();
+  } = useStudySync({
+    overviewOnly: true,
+  });
   const [view, setView] = useState<StudyView>(initialView),
     [selected, setSelected] = useState(initialSubjectId);
   const [editing, setEditing] = useState<Question | null>(null),
@@ -179,6 +184,18 @@ export function StudyApp({
     }
   }, [closedFolders, folderPreferencesKey, folderPreferencesReady]);
   const subject = subjects.find((s) => s.id === selected);
+  useEffect(() => {
+    if (
+      initialView !== "subject" ||
+      !subject ||
+      subject.questionsLoaded !== false ||
+      syncStatus !== "saved"
+    )
+      return;
+    void runWithLoading("問題を読み込んでいます…", async () => {
+      await ensureSubjectQuestions(subject.id);
+    });
+  }, [ensureSubjectQuestions, initialView, subject, syncStatus]);
   const stats = useMemo(
     () =>
       attempts.filter(
@@ -199,8 +216,10 @@ export function StudyApp({
     .reduce(
       (total, item) =>
         total +
-        item.questions.filter((question) => examTypes.includes(question.type))
-          .length,
+        (item.questionsLoaded === false
+          ? item.questionCount || 0
+          : item.questions.filter((question) => examTypes.includes(question.type))
+              .length),
       0,
     );
   const visibleSubjects = subjects.filter(
@@ -497,8 +516,11 @@ export function StudyApp({
       }
     });
   }
-  function openStudySetup() {
+  async function openStudySetup() {
     if (!subject?.questions.length) return alert("問題を追加してください");
+    await runWithLoading("学習履歴を確認しています…", async () => {
+      await Promise.all(stats.map((attempt) => ensureAttemptAnswers(attempt.id)));
+    });
     setStudyTypes(["choice", "ox", "fill", "essay"]);
     setStudyCount(String(subject.questions.length));
     setStudyExamMode(false);
@@ -507,13 +529,14 @@ export function StudyApp({
   }
   function openExamSetup() {
     const availableSubjects = subjects.filter(
-      (item) => !item.archived && item.questions.length > 0,
+      (item) =>
+        !item.archived && (item.questionCount ?? item.questions.length) > 0,
     );
     if (!availableSubjects.length)
       return alert("問題が登録された科目を追加してください");
     const subjectIds = availableSubjects.map((item) => item.id);
     const questionCount = availableSubjects.reduce(
-      (total, item) => total + item.questions.length,
+      (total, item) => total + (item.questionCount ?? item.questions.length),
       0,
     );
     setExamSubjectIds(subjectIds);
@@ -597,7 +620,7 @@ export function StudyApp({
     setShowStudySetup(false);
     setView("play");
   }
-  function startExam() {
+  async function startExam() {
     if (!examSubjectIds.length) return alert("科目を1つ以上選択してください");
     if (!examTypes.length) return alert("問題形式を1つ以上選択してください");
     const requestedCount = Number(examCount);
@@ -610,9 +633,17 @@ export function StudyApp({
       passPercentage > 100
     )
       return alert("合格基準は1〜100の整数で入力してください");
-    const targetSubjects = subjects.filter((item) =>
+    const selectedSubjects = subjects.filter((item) =>
       examSubjectIds.includes(item.id),
     );
+    const loadedQuestions = await Promise.all(
+      selectedSubjects.map((item) => ensureSubjectQuestions(item.id)),
+    );
+    const targetSubjects = selectedSubjects.map((item, position) => ({
+      ...item,
+      questions: loadedQuestions[position],
+      questionsLoaded: true,
+    }));
     const candidates = targetSubjects.flatMap((item) =>
       item.questions
         .filter((question) => examTypes.includes(question.type))
@@ -1288,7 +1319,7 @@ export function StudyApp({
                         <div className="flex justify-between gap-3">
                           <h3 className="text-xl font-black">{s.name}</h3>
                           <span className="inline-flex h-10 min-w-16 shrink-0 self-start items-center justify-center whitespace-nowrap rounded-full bg-blue-50 px-3 text-sm text-blue-700">
-                            {s.questions.length}問
+                            {s.questionCount ?? s.questions.length}問
                           </span>
                         </div>
                         <p className="mt-5 text-sm text-gray-500">
@@ -1314,6 +1345,7 @@ export function StudyApp({
             <DataHealth
               diagnostics={diagnostics}
               snapshot={{ subjects, attempts }}
+              onBuildBackup={getCompleteSnapshot}
               onSaveNow={() => saveNow()}
               onRestore={restoreSnapshot}
             />
@@ -1405,11 +1437,16 @@ export function StudyApp({
                   return (
                     <div key={attempt.id} className="overflow-hidden rounded-xl border">
                       <button
-                        onClick={() =>
-                          setExpandedAttempt(
-                            expandedAttempt === attempt.id ? null : attempt.id,
-                          )
-                        }
+                        onClick={() => {
+                          if (expandedAttempt === attempt.id) {
+                            setExpandedAttempt(null);
+                            return;
+                          }
+                          void runWithLoading("解答詳細を読み込んでいます…", async () => {
+                            await ensureAttemptAnswers(attempt.id);
+                            setExpandedAttempt(attempt.id);
+                          });
+                        }}
                         className="w-full p-4 text-left"
                       >
                         <span className="font-bold">
@@ -1467,7 +1504,8 @@ export function StudyApp({
                 <div>
                   <h1 className="text-3xl font-black">{subject.name}</h1>
                   <p className="text-gray-500 mt-2">
-                    {subject.questions.length}問・挑戦{stats.length}回
+                    {subject.questionCount ?? subject.questions.length}問・挑戦
+                    {stats.length}回
                   </p>
                 </div>
                 <div className="flex flex-wrap gap-2">
@@ -1525,17 +1563,25 @@ export function StudyApp({
                         className="border rounded-xl overflow-hidden"
                       >
                         <button
-                          onClick={() =>
-                            setExpandedAttempt(
-                              expandedAttempt === a.id ? null : a.id,
-                            )
-                          }
+                          onClick={() => {
+                            if (expandedAttempt === a.id) {
+                              setExpandedAttempt(null);
+                              return;
+                            }
+                            void runWithLoading(
+                              "解答詳細を読み込んでいます…",
+                              async () => {
+                                await ensureAttemptAnswers(a.id);
+                                setExpandedAttempt(a.id);
+                              },
+                            );
+                          }}
                           className="w-full flex justify-between p-4 text-left bg-gray-50"
                         >
                           <span>
                             <b>{a.date}</b>
                             <span className="block text-xs text-gray-500 mt-1">
-                              {a.answers?.length || 0}問の回答記録
+                              {a.total}問の回答記録
                               {a.status === "interrupted" && "・途中中断"}
                             </span>
                           </span>
@@ -1904,7 +1950,7 @@ export function StudyApp({
                         <span>
                           <b className="block">{item.name}</b>
                           <span className="text-sm text-gray-500">
-                            {item.questions.length}問
+                            {item.questionCount ?? item.questions.length}問
                           </span>
                         </span>
                         <input
@@ -2261,7 +2307,7 @@ export function StudyApp({
                     <button
                       key={item.id}
                       type="button"
-                      disabled={!item.questions.length}
+                      disabled={!(item.questionCount ?? item.questions.length)}
                       onClick={() =>
                         setExamSubjectIds((current) =>
                           checked
@@ -2281,7 +2327,7 @@ export function StudyApp({
                         {item.name}
                       </b>
                       <span className="mt-1 block text-sm">
-                        {item.questions.length}問
+                        {item.questionCount ?? item.questions.length}問
                       </span>
                     </button>
                   );
@@ -2378,7 +2424,7 @@ export function StudyApp({
                 <button
                   onClick={() =>
                     runWithLoading("問題を準備しています…", async () => {
-                      startExam();
+                      await startExam();
                     })
                   }
                   disabled={!examAvailable}
