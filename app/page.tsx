@@ -115,6 +115,9 @@ export default function Home() {
     [resultSaving, setResultSaving] = useState(false),
     [resultSaveError, setResultSaveError] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
+  const [showFolderCreator, setShowFolderCreator] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [folderSubjectIds, setFolderSubjectIds] = useState<string[]>([]);
   const bulkInputRef = useRef<HTMLInputElement>(null);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
@@ -284,6 +287,30 @@ export default function Home() {
           ? `${files.length - errors.length}件を追加しました。\n\n${errors.join("\n")}`
           : `${files.length}件を追加しました`,
       );
+    });
+  }
+  async function createFolder() {
+    const folder = newFolderName.trim();
+    if (!folder) return alert("フォルダ名を入力してください");
+    if (!folderSubjectIds.length)
+      return alert("未分類の問題セットを1つ以上選択してください");
+    const nextSubjects = subjects.map((item) =>
+      folderSubjectIds.includes(item.id)
+        ? { ...item, folder, archived: item.archived || undefined }
+        : item,
+    );
+    await runWithLoading("フォルダを作成しています…", async () => {
+      setSubjects(nextSubjects);
+      try {
+        await saveNow({ subjects: nextSubjects, attempts });
+        setShowFolderCreator(false);
+        setNewFolderName("");
+        setFolderSubjectIds([]);
+      } catch {
+        alert(
+          "クラウドへの保存に失敗しました。この端末には変更が残っているため、同期を再試行してください。",
+        );
+      }
     });
   }
   async function reloadSettings() {
@@ -893,6 +920,21 @@ export default function Home() {
                   className="border border-blue-600 text-blue-700 px-4 py-3 rounded-xl font-bold"
                 >
                   複数ファイルを一括追加
+                </button>
+                <button
+                  onClick={() => {
+                    const unclassified = subjects.filter(
+                      (item) => !item.folder?.trim(),
+                    );
+                    if (!unclassified.length)
+                      return alert("未分類の問題セットはありません");
+                    setNewFolderName("");
+                    setFolderSubjectIds([]);
+                    setShowFolderCreator(true);
+                  }}
+                  className="border border-blue-600 text-blue-700 px-4 py-3 rounded-xl font-bold"
+                >
+                  ＋ フォルダを作成
                 </button>
                 <button
                   onClick={addSubject}
@@ -1688,6 +1730,94 @@ export default function Home() {
               >
                 戻る
               </button>
+            </div>
+          </div>
+        )}
+        {showFolderCreator && (
+          <div className="fixed inset-0 z-30 grid place-items-center bg-black/40 p-4">
+            <div className="card max-h-[90vh] w-full max-w-xl overflow-y-auto p-6">
+              <h2 className="text-2xl font-black">フォルダを作成</h2>
+              <p className="mt-1 text-sm text-gray-500">
+                新しいフォルダへ移動する未分類の問題セットを選択してください
+              </p>
+              <label className="mt-6 block font-bold">
+                フォルダ名
+                <input
+                  autoFocus
+                  value={newFolderName}
+                  onChange={(event) => setNewFolderName(event.target.value)}
+                  placeholder="例：消費者行動論Ⅰ"
+                  className="mt-2 block w-full rounded-xl border p-3 font-normal"
+                />
+              </label>
+              <div className="mt-6 flex items-center justify-between">
+                <p className="font-bold">未分類の問題セット</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const ids = subjects
+                      .filter((item) => !item.folder?.trim())
+                      .map((item) => item.id);
+                    setFolderSubjectIds(
+                      folderSubjectIds.length === ids.length ? [] : ids,
+                    );
+                  }}
+                  className="text-sm font-bold text-blue-700"
+                >
+                  {folderSubjectIds.length ===
+                  subjects.filter((item) => !item.folder?.trim()).length
+                    ? "選択解除"
+                    : "すべて選択"}
+                </button>
+              </div>
+              <div className="mt-3 space-y-2">
+                {subjects
+                  .filter((item) => !item.folder?.trim())
+                  .map((item) => {
+                    const checked = folderSubjectIds.includes(item.id);
+                    return (
+                      <label
+                        key={item.id}
+                        className={`flex cursor-pointer items-center justify-between rounded-xl border-2 p-4 ${
+                          checked
+                            ? "border-blue-600 bg-blue-50"
+                            : "border-gray-200"
+                        }`}
+                      >
+                        <span>
+                          <b className="block">{item.name}</b>
+                          <span className="text-sm text-gray-500">
+                            {item.questions.length}問
+                          </span>
+                        </span>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() =>
+                            setFolderSubjectIds((current) =>
+                              checked
+                                ? current.filter((id) => id !== item.id)
+                                : [...current, item.id],
+                            )
+                          }
+                          className="h-5 w-5 accent-blue-600"
+                        />
+                      </label>
+                    );
+                  })}
+              </div>
+              <div className="mt-6 flex justify-end gap-3">
+                <button onClick={() => setShowFolderCreator(false)}>
+                  キャンセル
+                </button>
+                <button
+                  onClick={createFolder}
+                  disabled={!newFolderName.trim() || !folderSubjectIds.length}
+                  className="rounded-xl bg-blue-600 px-6 py-3 font-bold text-white disabled:bg-gray-300"
+                >
+                  フォルダを作成して移動
+                </button>
+              </div>
             </div>
           </div>
         )}
