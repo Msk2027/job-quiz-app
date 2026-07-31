@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { AnswerBreakdown, AnswerReviewList } from "@/components/answer-review";
 import { AuthScreen } from "@/components/auth-screen";
 import { DataHealth } from "@/components/data-health";
@@ -51,7 +52,23 @@ const upsertSubject = (current: Subject[], subject: Subject) => {
     : [...unique, nextSubject];
 };
 
-export default function Home() {
+type StudyView =
+  | "home"
+  | "subject"
+  | "manage"
+  | "play"
+  | "result"
+  | "history"
+  | "exam";
+
+export function StudyApp({
+  initialView = "home",
+  initialSubjectId = "",
+}: {
+  initialView?: StudyView;
+  initialSubjectId?: string;
+} = {}) {
+  const router = useRouter();
   const {
     ready,
     subjects,
@@ -67,10 +84,8 @@ export default function Home() {
     restoreSnapshot,
     diagnostics,
   } = useStudySync();
-  const [view, setView] = useState<
-      "home" | "subject" | "manage" | "play" | "result" | "history" | "exam"
-    >("home"),
-    [selected, setSelected] = useState("");
+  const [view, setView] = useState<StudyView>(initialView),
+    [selected, setSelected] = useState(initialSubjectId);
   const [editing, setEditing] = useState<Question | null>(null),
     [active, setActive] = useState<ActiveQuestion[]>([]),
     [index, setIndex] = useState(0),
@@ -122,6 +137,16 @@ export default function Home() {
   const [folderPreferencesReady, setFolderPreferencesReady] = useState(false);
   const bulkInputRef = useRef<HTMLInputElement>(null);
   const folderPreferencesKey = `study_closed_folders_v1:${session?.user.id || "local"}`;
+
+  function navigate(target: "home" | "history" | "exam", replace = false) {
+    const href = target === "home" ? "/" : `/${target}`;
+    if (replace) router.replace(href);
+    else router.push(href);
+  }
+
+  function navigateToSubject(subjectId: string) {
+    router.push(`/courses/${encodeURIComponent(subjectId)}`);
+  }
 
   useEffect(() => {
     if (!authChecked) return;
@@ -208,7 +233,7 @@ export default function Home() {
   async function signOut() {
     await signOutCloud();
     setSelected("");
-    setView("home");
+    navigate("home", true);
   }
   function deleteSubject() {
     if (!subject) return;
@@ -227,7 +252,7 @@ export default function Home() {
       ),
     );
     setSelected("");
-    setView("home");
+    navigate("home", true);
   }
   function deleteAttempt(attempt: Attempt) {
     if (
@@ -251,7 +276,7 @@ export default function Home() {
     const s = { id: uid(), name, folder, color: "#3167e3", questions: [] };
     saveSubject(s);
     setSelected(s.id);
-    setView("subject");
+    navigateToSubject(s.id);
   }
   async function finishImport(mode: "sync" | "copy") {
     if (!pendingImport) return;
@@ -273,7 +298,7 @@ export default function Home() {
           setSubjects(nextSubjects);
           await saveNow({ subjects: nextSubjects, attempts });
           setSelected(s.id);
-          setView("subject");
+          navigateToSubject(s.id);
           setPendingImport(null);
         } catch (error) {
           alert(
@@ -434,7 +459,7 @@ export default function Home() {
         }
       }
       setSelected(s.id);
-      setView("subject");
+      navigateToSubject(s.id);
     });
   }
   async function saveQuestion() {
@@ -660,7 +685,8 @@ export default function Home() {
     if (!scored.length) {
       if (interrupted) {
         alert("まだ回答した問題がないため、結果は保存されません");
-        setView(sessionMode === "exam" ? "home" : "subject");
+        if (sessionMode === "exam") navigate("home");
+        else setView("subject");
       }
       return;
     }
@@ -875,7 +901,7 @@ export default function Home() {
       <header className="bg-[#17233f] text-white px-5 py-4">
         <div className="max-w-5xl mx-auto flex justify-between items-center">
           <button
-            onClick={() => setView("home")}
+            onClick={() => navigate("home")}
             className="font-black text-xl"
           >
             Study Studio
@@ -1007,7 +1033,7 @@ export default function Home() {
                 </span>
               </button>
               <button
-                onClick={() => setView("exam")}
+                onClick={() => navigate("exam")}
                 className="card min-h-28 p-5 text-left hover:border-blue-400"
               >
                 <b className="text-lg">試験モード</b>
@@ -1016,7 +1042,7 @@ export default function Home() {
                 </span>
               </button>
               <button
-                onClick={() => setView("history")}
+                onClick={() => navigate("history")}
                 className="card min-h-28 p-5 text-left hover:border-blue-400"
               >
                 <b className="text-lg">すべての結果</b>
@@ -1261,7 +1287,7 @@ export default function Home() {
                       >
                         <div className="flex justify-between gap-3">
                           <h3 className="text-xl font-black">{s.name}</h3>
-                          <span className="inline-flex min-w-16 shrink-0 items-center justify-center whitespace-nowrap rounded-full bg-blue-50 px-3 py-1 text-sm text-blue-700">
+                          <span className="inline-flex h-10 min-w-16 shrink-0 self-start items-center justify-center whitespace-nowrap rounded-full bg-blue-50 px-3 text-sm text-blue-700">
                             {s.questions.length}問
                           </span>
                         </div>
@@ -1295,7 +1321,7 @@ export default function Home() {
         )}
         {view === "exam" && (
           <>
-            <button onClick={() => setView("home")} className="mb-5 text-gray-500">
+            <button onClick={() => navigate("home")} className="mb-5 text-gray-500">
               ← 学習ライブラリ
             </button>
             <div className="card p-6 md:p-8">
@@ -1338,7 +1364,7 @@ export default function Home() {
                     key={attempt.id}
                     onClick={() => {
                       setExpandedAttempt(attempt.id);
-                      setView("history");
+                      navigate("history");
                     }}
                     className="w-full rounded-xl border p-4 text-left"
                   >
@@ -1361,7 +1387,7 @@ export default function Home() {
         )}
         {view === "history" && (
           <>
-            <button onClick={() => setView("home")} className="mb-5 text-gray-500">
+            <button onClick={() => navigate("home")} className="mb-5 text-gray-500">
               ← 学習ライブラリ
             </button>
             <div className="card p-6 md:p-8">
@@ -1431,7 +1457,7 @@ export default function Home() {
         {view === "subject" && subject && (
           <>
             <button
-              onClick={() => setView("home")}
+              onClick={() => navigate("home")}
               className="text-gray-500 mb-5"
             >
               ← 科目一覧
@@ -2549,9 +2575,10 @@ export default function Home() {
                   </button>
                 )}
                 <button
-                  onClick={() =>
-                    setView(lastAttempt.mode === "exam" ? "home" : "subject")
-                  }
+                  onClick={() => {
+                    if (lastAttempt.mode === "exam") navigate("home");
+                    else setView("subject");
+                  }}
                   disabled={resultSaving}
                   className="border py-3 rounded-xl font-bold disabled:opacity-50"
                 >
@@ -2584,4 +2611,8 @@ export default function Home() {
       </div>
     </main>
   );
+}
+
+export default function Home() {
+  return <StudyApp />;
 }
