@@ -113,6 +113,31 @@ const throwIfError = (error: { message: string } | null) => {
   if (error) throw new Error(error.message);
 };
 
+const QUESTION_COUNT_PAGE_SIZE = 1000;
+
+/**
+ * Supabaseの1リクエスト上限を超えても、ホームの問題数を正確に集計する。
+ */
+async function loadAllQuestionSubjectIds(
+  client: SupabaseClient,
+  userId: string,
+): Promise<{ subject_id: string }[]> {
+  const rows: { subject_id: string }[] = [];
+  for (let from = 0; ; from += QUESTION_COUNT_PAGE_SIZE) {
+    const { data, error } = await client
+      .from("study_questions")
+      .select("subject_id, id")
+      .eq("user_id", userId)
+      .order("id")
+      .range(from, from + QUESTION_COUNT_PAGE_SIZE - 1);
+    throwIfError(error);
+    const page = (data || []) as { subject_id: string; id: string }[];
+    rows.push(...page.map(({ subject_id }) => ({ subject_id })));
+    if (page.length < QUESTION_COUNT_PAGE_SIZE) break;
+  }
+  return rows;
+}
+
 export async function loadLegacyData(
   client: SupabaseClient,
   userId: string,
@@ -313,10 +338,7 @@ export async function loadRelationalOverview(
           .select("id, name, color, folder_name, archived, source, position")
           .eq("user_id", userId)
           .order("position"),
-        client
-          .from("study_questions")
-          .select("subject_id")
-          .eq("user_id", userId),
+        loadAllQuestionSubjectIds(client, userId),
         client
           .from("study_attempts")
           .select(
@@ -328,11 +350,10 @@ export async function loadRelationalOverview(
 
     throwIfError(stateResult.error);
     throwIfError(subjectsResult.error);
-    throwIfError(questionIdsResult.error);
     throwIfError(attemptsResult.error);
 
     const counts = new Map<string, number>();
-    ((questionIdsResult.data || []) as { subject_id: string }[]).forEach(
+    questionIdsResult.forEach(
       ({ subject_id }) => counts.set(subject_id, (counts.get(subject_id) || 0) + 1),
     );
     const subjects = ((subjectsResult.data || []) as SubjectRow[]).map((row) => ({
