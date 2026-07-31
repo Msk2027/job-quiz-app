@@ -118,6 +118,7 @@ export default function Home() {
   const [showFolderCreator, setShowFolderCreator] = useState(false);
   const [newFolderName, setNewFolderName] = useState("");
   const [folderSubjectIds, setFolderSubjectIds] = useState<string[]>([]);
+  const [closedFolders, setClosedFolders] = useState<string[]>([]);
   const bulkInputRef = useRef<HTMLInputElement>(null);
   const subject = subjects.find((s) => s.id === selected);
   const stats = useMemo(
@@ -973,7 +974,22 @@ export default function Home() {
                 </span>
               </button>
             </div>
-            <div className="mb-4 flex justify-end">
+            <div className="mb-4 flex flex-wrap justify-end gap-4">
+              <button
+                type="button"
+                onClick={() =>
+                  setClosedFolders((current) =>
+                    current.length === subjectGroups.length
+                      ? []
+                      : subjectGroups.map(([folder]) => folder),
+                  )
+                }
+                className="text-sm font-bold text-blue-700"
+              >
+                {closedFolders.length === subjectGroups.length
+                  ? "すべてのフォルダを開く"
+                  : "すべてのフォルダを閉じる"}
+              </button>
               <label className="flex items-center gap-2 text-sm text-gray-600">
                 <input
                   type="checkbox"
@@ -1156,12 +1172,29 @@ export default function Home() {
             <div className="space-y-6">
               {subjectGroups.map(([folder, items]) => (
                 <section key={folder}>
-                  <h2 className="mb-3 text-lg font-black text-gray-700">
-                    {folder}
-                    <span className="ml-2 text-sm font-normal text-gray-400">
-                      {items.length}件
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setClosedFolders((current) =>
+                        current.includes(folder)
+                          ? current.filter((item) => item !== folder)
+                          : [...current, folder],
+                      )
+                    }
+                    aria-expanded={!closedFolders.includes(folder)}
+                    className="mb-3 flex w-full items-center justify-between rounded-xl px-2 py-2 text-left hover:bg-gray-100"
+                  >
+                    <span className="text-lg font-black text-gray-700">
+                      {folder}
+                      <span className="ml-2 text-sm font-normal text-gray-400">
+                        {items.length}件
+                      </span>
                     </span>
-                  </h2>
+                    <span className="text-sm font-bold text-blue-700">
+                      {closedFolders.includes(folder) ? "開く ▼" : "閉じる ▲"}
+                    </span>
+                  </button>
+                  {!closedFolders.includes(folder) && (
                   <div className="grid gap-4 md:grid-cols-2">
                     {items.map((s) => (
                       <button
@@ -1186,6 +1219,7 @@ export default function Home() {
                       </button>
                     ))}
                   </div>
+                  )}
                 </section>
               ))}
             </div>
