@@ -106,6 +106,7 @@ export function StudyApp({
   const [subjectSettings, setSubjectSettings] = useState<Subject | null>(null),
     [settingsLoading, setSettingsLoading] = useState(false);
   const [expandedAttempt, setExpandedAttempt] = useState<string | null>(null);
+  const [loadingAttemptId, setLoadingAttemptId] = useState<string | null>(null);
   const [expandedExam, setExpandedExam] = useState<string | null>(null);
   const [showStudySetup, setShowStudySetup] = useState(false),
     [studyTypes, setStudyTypes] = useState<QType[]>([
@@ -282,6 +283,29 @@ export function StudyApp({
       return;
     setAttempts((current) => current.filter((item) => item.id !== attempt.id));
     setExpandedAttempt(null);
+  }
+  async function toggleAttemptDetails(attempt: Attempt) {
+    if (expandedAttempt === attempt.id) {
+      setExpandedAttempt(null);
+      return;
+    }
+    if (attempt.answersLoaded !== false) {
+      setExpandedAttempt(attempt.id);
+      return;
+    }
+    setLoadingAttemptId(attempt.id);
+    try {
+      await ensureAttemptAnswers(attempt.id);
+      setExpandedAttempt(attempt.id);
+    } catch (error) {
+      alert(
+        `解答詳細を読み込めませんでした：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    } finally {
+      setLoadingAttemptId(null);
+    }
   }
   async function addSubject() {
     const name = prompt("科目名を入力してください");
@@ -1437,16 +1461,8 @@ export function StudyApp({
                   return (
                     <div key={attempt.id} className="overflow-hidden rounded-xl border">
                       <button
-                        onClick={() => {
-                          if (expandedAttempt === attempt.id) {
-                            setExpandedAttempt(null);
-                            return;
-                          }
-                          void runWithLoading("解答詳細を読み込んでいます…", async () => {
-                            await ensureAttemptAnswers(attempt.id);
-                            setExpandedAttempt(attempt.id);
-                          });
-                        }}
+                        onClick={() => void toggleAttemptDetails(attempt)}
+                        disabled={loadingAttemptId === attempt.id}
                         className="w-full p-4 text-left"
                       >
                         <span className="font-bold">
@@ -1463,6 +1479,7 @@ export function StudyApp({
                           {attempt.mode === "exam" ? "試験" : "通常学習"}・
                           {attempt.date}
                           {attempt.status === "interrupted" && "・途中中断"}
+                          {loadingAttemptId === attempt.id && "・詳細を読込中…"}
                         </span>
                       </button>
                       {expandedAttempt === attempt.id && (
@@ -1563,19 +1580,8 @@ export function StudyApp({
                         className="border rounded-xl overflow-hidden"
                       >
                         <button
-                          onClick={() => {
-                            if (expandedAttempt === a.id) {
-                              setExpandedAttempt(null);
-                              return;
-                            }
-                            void runWithLoading(
-                              "解答詳細を読み込んでいます…",
-                              async () => {
-                                await ensureAttemptAnswers(a.id);
-                                setExpandedAttempt(a.id);
-                              },
-                            );
-                          }}
+                          onClick={() => void toggleAttemptDetails(a)}
+                          disabled={loadingAttemptId === a.id}
                           className="w-full flex justify-between p-4 text-left bg-gray-50"
                         >
                           <span>
@@ -1592,7 +1598,11 @@ export function StudyApp({
                                 : "論述のみ"}
                             </b>
                             <span className="block text-xs text-gray-500">
-                              {expandedAttempt === a.id ? "閉じる ▲" : "詳細 ▼"}
+                              {loadingAttemptId === a.id
+                                ? "読込中…"
+                                : expandedAttempt === a.id
+                                  ? "閉じる ▲"
+                                  : "詳細 ▼"}
                             </span>
                           </span>
                         </button>
