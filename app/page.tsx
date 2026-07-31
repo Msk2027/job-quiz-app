@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { AnswerBreakdown, AnswerReviewList } from "@/components/answer-review";
 import { AuthScreen } from "@/components/auth-screen";
 import { DataHealth } from "@/components/data-health";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { useStudySync } from "@/hooks/use-study-sync";
 import { scoreExam, shuffle, summarizeAnswers } from "@/lib/exam";
 import {
@@ -987,6 +988,7 @@ export function StudyApp({
                 </p>
               )}
             </div>
+            <ThemeToggle />
             {session && (
               <button
                 onClick={signOut}

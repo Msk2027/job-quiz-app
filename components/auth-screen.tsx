@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useState } from "react";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { supabase } from "@/lib/supabase";
 
 const AUTH_ERRORS: Record<string, string> = {
@@ -48,7 +49,10 @@ export function AuthScreen() {
   }
 
   return (
-    <main className="min-h-screen grid place-items-center p-4 bg-gray-50">
+    <main className="relative min-h-screen grid place-items-center p-4 bg-gray-50">
+      <div className="absolute right-4 top-4 rounded-xl bg-[#17233f] p-1">
+        <ThemeToggle />
+      </div>
       <div className="card w-full max-w-md p-7 md:p-9">
         <p className="text-sm font-bold text-blue-700">Study Studio</p>
         <h1 className="mt-2 text-3xl font-black">
