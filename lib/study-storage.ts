@@ -292,13 +292,23 @@ export async function loadRelationalData(
   }
 }
 
-const indexed = <T extends { id: string }>(items: T[]) =>
-  new Map(
-    items.map((item, position) => [
-      item.id,
-      { value: item, serialized: JSON.stringify({ ...item, position }) },
-    ]),
-  );
+const serialized = (value: unknown) => JSON.stringify(value);
+
+const subjectMetadata = (subject: Subject, position: number) => ({
+  id: subject.id,
+  name: subject.name,
+  color: subject.color,
+  folder: subject.folder,
+  archived: subject.archived,
+  source: subject.source,
+  position,
+});
+
+const attemptMetadata = (attempt: Attempt, position: number) => {
+  const { answers: _, ...metadata } = attempt;
+  void _;
+  return { ...metadata, position };
+};
 
 export async function saveRelationalChanges(
   client: SupabaseClient,
@@ -306,10 +316,10 @@ export async function saveRelationalChanges(
   next: StudySnapshot,
   updatedAt: string,
 ) {
-  const previousSubjects = indexed(previous.subjects);
-  const nextSubjects = indexed(next.subjects);
-  const previousAttempts = indexed(previous.attempts);
-  const nextAttempts = indexed(next.attempts);
+  const previousSubjects = new Map(previous.subjects.map((item) => [item.id, item]));
+  const nextSubjects = new Map(next.subjects.map((item) => [item.id, item]));
+  const previousAttempts = new Map(previous.attempts.map((item) => [item.id, item]));
+  const nextAttempts = new Map(next.attempts.map((item) => [item.id, item]));
   const operations: (() => PromiseLike<unknown>)[] = [];
 
   previousSubjects.forEach((_, id) => {
@@ -321,16 +331,57 @@ export async function saveRelationalChanges(
         }),
       );
   });
-  nextSubjects.forEach((entry, id) => {
-    if (previousSubjects.get(id)?.serialized !== entry.serialized) {
-      const position = next.subjects.findIndex((subject) => subject.id === id);
+  next.subjects.forEach((subject, position) => {
+    const oldSubject = previousSubjects.get(subject.id);
+    if (
+      !oldSubject ||
+      serialized(subjectMetadata(oldSubject, previous.subjects.findIndex((item) => item.id === subject.id))) !==
+        serialized(subjectMetadata(subject, position))
+    ) {
       operations.push(() =>
-        client.rpc("replace_study_subject", {
-          p_subject: { ...entry.value, position },
+        client.rpc("upsert_study_subject_metadata", {
+          p_subject: subjectMetadata(subject, position),
+          p_position: position,
           p_updated_at: updatedAt,
         }),
       );
     }
+
+    const previousQuestions = new Map(
+      (oldSubject?.questions || []).map((question) => [question.id, question]),
+    );
+    const nextQuestions = new Map(
+      subject.questions.map((question) => [question.id, question]),
+    );
+    previousQuestions.forEach((_, questionId) => {
+      if (!nextQuestions.has(questionId))
+        operations.push(() =>
+          client.rpc("delete_study_question", {
+            p_subject_id: subject.id,
+            p_question_id: questionId,
+            p_updated_at: updatedAt,
+          }),
+        );
+    });
+    subject.questions.forEach((question, questionPosition) => {
+      const previousQuestion = previousQuestions.get(question.id);
+      const previousPosition = oldSubject?.questions.findIndex(
+        (item) => item.id === question.id,
+      );
+      if (
+        !previousQuestion ||
+        previousPosition !== questionPosition ||
+        serialized(previousQuestion) !== serialized(question)
+      )
+        operations.push(() =>
+          client.rpc("upsert_study_question", {
+            p_subject_id: subject.id,
+            p_question: question,
+            p_position: questionPosition,
+            p_updated_at: updatedAt,
+          }),
+        );
+    });
   });
 
   previousAttempts.forEach((_, id) => {
@@ -342,16 +393,32 @@ export async function saveRelationalChanges(
         }),
       );
   });
-  nextAttempts.forEach((entry, id) => {
-    if (previousAttempts.get(id)?.serialized !== entry.serialized) {
-      const position = next.attempts.findIndex((attempt) => attempt.id === id);
+  next.attempts.forEach((attempt, position) => {
+    const oldAttempt = previousAttempts.get(attempt.id);
+    const oldPosition = previous.attempts.findIndex(
+      (item) => item.id === attempt.id,
+    );
+    if (
+      !oldAttempt ||
+      serialized(attemptMetadata(oldAttempt, oldPosition)) !==
+        serialized(attemptMetadata(attempt, position))
+    ) {
       operations.push(() =>
-        client.rpc("replace_study_attempt", {
-          p_attempt: { ...entry.value, position },
+        client.rpc("upsert_study_attempt_metadata", {
+          p_attempt: attemptMetadata(attempt, position),
+          p_position: position,
           p_updated_at: updatedAt,
         }),
       );
     }
+    if (!oldAttempt || serialized(oldAttempt.answers) !== serialized(attempt.answers))
+      operations.push(() =>
+        client.rpc("replace_study_answers", {
+          p_attempt_id: attempt.id,
+          p_answers: attempt.answers,
+          p_updated_at: updatedAt,
+        }),
+      );
   });
 
   // 同時実行すると各RPCが同じstudy_storage_stateを奪い合い、一部だけ失敗して
