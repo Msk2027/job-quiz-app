@@ -256,24 +256,39 @@ export function StudyApp({
     setSelected("");
     navigate("home", true);
   }
-  function deleteSubject() {
+  async function deleteSubject() {
     if (!subject) return;
+    const target = subject;
     if (
       !confirm(
-        `「${subject.name}」を削除しますか？\n問題と成績履歴もこの端末から削除されます。`,
+        `「${target.name}」を削除しますか？\n問題と成績履歴も削除されます。`,
       )
     )
       return;
-    setSubjects((v) => v.filter((s) => s.id !== subject.id));
-    setAttempts((current) =>
-      current.filter(
+    const previousSnapshot = { subjects, attempts };
+    const nextSnapshot = {
+      subjects: subjects.filter((item) => item.id !== target.id),
+      attempts: attempts.filter(
         (attempt) =>
-          attempt.subjectId !== subject.id &&
-          !attempt.subjectIds?.includes(subject.id),
+          attempt.subjectId !== target.id &&
+          !attempt.subjectIds?.includes(target.id),
       ),
-    );
-    setSelected("");
-    navigate("home", true);
+    };
+    await runWithLoading("科目を削除しています…", async () => {
+      setSubjects(nextSnapshot.subjects);
+      setAttempts(nextSnapshot.attempts);
+      try {
+        await saveNow(nextSnapshot);
+        setSelected("");
+        navigate("home", true);
+      } catch {
+        setSubjects(previousSnapshot.subjects);
+        setAttempts(previousSnapshot.attempts);
+        alert(
+          "科目を削除できませんでした。通信状態を確認して、もう一度お試しください。",
+        );
+      }
+    });
   }
   function deleteAttempt(attempt: Attempt) {
     if (
@@ -1997,8 +2012,8 @@ export function StudyApp({
           </div>
         )}
         {subjectSettings && (
-          <div className="fixed inset-0 bg-black/40 p-4 grid place-items-center z-20">
-            <div className="card p-6 w-full max-w-xl">
+          <div className="fixed inset-0 z-20 grid place-items-center overflow-y-auto bg-black/40 p-4">
+            <div className="card my-4 max-h-[calc(100dvh-2rem)] w-full max-w-xl overflow-y-auto p-6">
               <h2 className="text-xl font-black mb-5">科目設定</h2>
               <label className="block font-bold">
                 科目名
