@@ -3,7 +3,14 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Study Studio",
+  applicationName: "Study Studio",
   description: "複数形式に対応した試験対策アプリ",
+  manifest: "/manifest.webmanifest",
+  appleWebApp: {
+    capable: true,
+    title: "Study Studio",
+    statusBarStyle: "default",
+  },
 };
 
 export const viewport: Viewport = {
