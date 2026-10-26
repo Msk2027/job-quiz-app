@@ -36,7 +36,6 @@ jobs:
             --output /dev/null \
             --request POST "$SUPABASE_URL/rest/v1/rpc/keepalive" \
             --header "apikey: $SUPABASE_PUBLISHABLE_KEY" \
-            --header "Authorization: Bearer $SUPABASE_PUBLISHABLE_KEY" \
             --header "Content-Type: application/json" \
             --data '{}'
 
