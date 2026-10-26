@@ -1,0 +1,43 @@
+name: Keep Supabase active
+
+on:
+  schedule:
+    # Supabase Free projects may pause after 7 days of low database activity.
+    # Run four lightweight, read-only queries per day.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping-database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query Supabase database
+        env:
+          SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$SUPABASE_URL" || -z "$SUPABASE_PUBLISHABLE_KEY" ]]; then
+            echo "::error::Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY as GitHub Actions secrets."
+            exit 1
+          fi
+
+          SUPABASE_URL="${SUPABASE_URL%/}"
+          curl --fail-with-body --silent --show-error --retry 3 \
+            --output /dev/null \
+            --request POST "$SUPABASE_URL/rest/v1/rpc/keepalive" \
+            --header "apikey: $SUPABASE_PUBLISHABLE_KEY" \
+            --header "Authorization: Bearer $SUPABASE_PUBLISHABLE_KEY" \
+            --header "Content-Type: application/json" \
+            --data '{}'
+
+          echo "Supabase keep-alive query completed."
