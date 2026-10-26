@@ -27,6 +27,18 @@
 緊急時はVercelに`NEXT_PUBLIC_STUDY_STORAGE_MODE=legacy`を設定して再デプロイすると、
 旧`user_data`方式へ戻せます。
 
+## Supabase Freeプロジェクトの休止を防ぐ
+
+GitHub Actionsが6時間ごとにSupabaseへ読み取り専用の確認クエリを送り、利用が少ないFreeプロジェクトの自動休止を避けやすくします。クエリは定数の `1` だけを返し、学習データには触れません。
+
+1. Supabaseの SQL Editor で [`supabase/migrations/20261026000000_keepalive_rpc.sql`](supabase/migrations/20261026000000_keepalive.sql) を実行します。Supabase GitHub Integrationでマイグレーションを自動適用している場合は不要です。
+2. GitHubリポジトリの **Settings > Secrets and variables > Actions** に、次のRepository secretsを登録します。値はVercelに設定済みの同名環境変数と同じものです。
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
+3. **Actions** タブの **Keep Supabase active** を選ぶと、**Run workflow** から手動実行できます。以後は6時間ごとに自動実行されます。
+
+すでに休止したプロジェクトは、このワークフローだけでは再開できません。Supabase Dashboardで一度Resume projectを実行してください。Freeプランの休止判定はSupabase側で行われるため、この仕組みでも休止回避を完全には保証しません。
+
 ## データが保存されない・消えるときの確認手順
 
 ホーム画面下部の「データの保存状況とバックアップ」→「詳細を見る」で、いまどこに保存されているかを確認できます。
