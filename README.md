@@ -31,7 +31,7 @@
 
 GitHub Actionsが6時間ごとにSupabaseへ読み取り専用の確認クエリを送り、利用が少ないFreeプロジェクトの自動休止を避けやすくします。クエリは定数の `1` だけを返し、学習データには触れません。
 
-1. Supabaseの SQL Editor で [`supabase/migrations/20261026000000_keepalive_rpc.sql`](supabase/migrations/20261026000000_keepalive.sql) を実行します。Supabase GitHub Integrationでマイグレーションを自動適用している場合は不要です。
+1. Supabaseの SQL Editor で [`supabase/migrations/20261026000000_keepalive_rpc.sql`](supabase/migrations/20261026000000_keepalive_rpc.sql) を実行します。Supabase GitHub Integrationでマイグレーションを自動適用している場合は不要です。
 2. GitHubリポジトリの **Settings > Secrets and variables > Actions** に、次のRepository secretsを登録します。値はVercelに設定済みの同名環境変数と同じものです。
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
